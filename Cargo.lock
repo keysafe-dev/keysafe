@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "secret-env"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
