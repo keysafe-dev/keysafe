@@ -5,6 +5,7 @@ use std::{
     sync::OnceLock,
 };
 
+use crate::log::warn;
 use crate::vault::Account;
 
 /// SecretStore persists secret values in a secure credential store.
@@ -87,14 +88,20 @@ impl SecretStore for Keychain {
 
 /// Cache keeps fetched secrets in a [`SecretStore`] and remembers which profiles were loaded.
 ///
-/// Secrets are stored under the service `op-secrets-<profile>` with the secret name as the
+/// Secrets are stored under the service `secret-env.<profile>` with the secret name as the
 /// account. Loaded profiles are recorded in `<dir>/<profile>.metadata`, one `kind:name` line
 /// per secret, so they can be exported on shell startup without contacting 1Password.
+///
+/// Secrets and metadata stored before secret-env had its own name (and by zsh-op) are still
+/// found: secrets under `op-secrets-<profile>` move to the new service when they are first
+/// read, and metadata is read from the legacy directory until the profile is loaded again.
 pub struct Cache {
     /// Store holding the secret values.
     pub store: Box<dyn SecretStore>,
     /// Directory holding the profile metadata files.
     pub dir: PathBuf,
+    /// Directory holding metadata files written before secret-env had its own name.
+    pub legacy_dir: Option<PathBuf>,
 }
 
 impl Cache {
@@ -103,17 +110,48 @@ impl Cache {
         Self {
             store,
             dir: dir.to_path_buf(),
+            legacy_dir: None,
         }
+    }
+
+    /// Also reads metadata files from `dir`, written before secret-env had its own name.
+    pub fn with_legacy_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.legacy_dir = dir;
+        self
     }
 
     /// Returns the store service name used for the secrets of `profile`.
     pub fn service(profile: &str) -> String {
+        format!("secret-env.{profile}")
+    }
+
+    /// Returns the store service name used for the secrets of `profile` before secret-env had
+    /// its own name.
+    pub fn legacy_service(profile: &str) -> String {
         format!("op-secrets-{profile}")
     }
 
     /// Returns the cached value of secret `name` in `profile`.
     pub fn get(&self, profile: &str, name: &str) -> Result<Option<String>> {
-        self.store.get(&Self::service(profile), name)
+        let service = Self::service(profile);
+        if let Some(value) = self.store.get(&service, name)? {
+            return Ok(Some(value));
+        }
+
+        // Move a secret cached under the legacy service, so no copy stays behind
+        let legacy = Self::legacy_service(profile);
+        let Some(value) = self.store.get(&legacy, name)? else {
+            return Ok(None);
+        };
+        match self.store.set(&service, name, &value) {
+            Ok(()) => {
+                if let Err(err) = self.store.delete(&legacy, name) {
+                    warn(format!("{err:#}"));
+                }
+            }
+            Err(err) => warn(format!("{err:#}")),
+        }
+        Ok(Some(value))
     }
 
     /// Caches `value` as secret `name` in `profile`.
@@ -126,23 +164,32 @@ impl Cache {
         self.dir.join(format!("{profile}.metadata"))
     }
 
+    /// Returns the metadata files of `profile`: the current one, then the legacy one.
+    fn metadata_paths(&self, profile: &str) -> impl Iterator<Item = PathBuf> + '_ {
+        let file = format!("{profile}.metadata");
+        std::iter::once(self.dir.join(&file))
+            .chain(self.legacy_dir.iter().map(move |dir| dir.join(&file)))
+    }
+
     /// Returns the secret names recorded for `profile`, or `None` if it was never loaded.
     pub fn loaded(&self, profile: &str) -> Result<Option<Vec<String>>> {
-        let path = self.metadata_path(profile);
-        let data = match std::fs::read_to_string(&path) {
-            Ok(data) => data,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
-        };
+        for path in self.metadata_paths(profile) {
+            let data = match std::fs::read_to_string(&path) {
+                Ok(data) => data,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
+            };
 
-        let names = data
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            // Parse: kind:name (e.g. "env:GITHUB_TOKEN" or "ssh:github-work")
-            .filter_map(|line| line.split_once(':').map(|(_, name)| name.to_string()))
-            .collect();
-        Ok(Some(names))
+            let names = data
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                // Parse: kind:name (e.g. "env:GITHUB_TOKEN" or "ssh:github-work")
+                .filter_map(|line| line.split_once(':').map(|(_, name)| name.to_string()))
+                .collect();
+            return Ok(Some(names));
+        }
+        Ok(None)
     }
 
     /// Records every secret of `account` as loaded.
@@ -163,7 +210,8 @@ impl Cache {
     }
 
     /// Deletes every cached secret of `account`, including secrets that are only recorded in
-    /// its metadata, and forgets that it was loaded. Returns the number of deleted secrets.
+    /// its metadata or stored under the legacy service, and forgets that it was loaded.
+    /// Returns the number of deleted secrets.
     pub fn clear(&self, account: &Account) -> Result<usize> {
         let mut names: Vec<String> = account.secrets.iter().map(|s| s.name.clone()).collect();
         for name in self.loaded(&account.name)?.unwrap_or_default() {
@@ -172,20 +220,26 @@ impl Cache {
             }
         }
 
-        let service = Self::service(&account.name);
+        let services = [
+            Self::service(&account.name),
+            Self::legacy_service(&account.name),
+        ];
         let mut count = 0;
         for name in &names {
-            if self.store.delete(&service, name)? {
-                count += 1;
+            let mut deleted = false;
+            for service in &services {
+                deleted |= self.store.delete(service, name)?;
             }
+            count += usize::from(deleted);
         }
 
-        let path = self.metadata_path(&account.name);
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != ErrorKind::NotFound => {
-                return Err(e).context(format!("failed to remove {}", path.display()));
+        for path in self.metadata_paths(&account.name) {
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    return Err(e).context(format!("failed to remove {}", path.display()));
+                }
+                _ => {}
             }
-            _ => {}
         }
         Ok(count)
     }
@@ -277,7 +331,47 @@ mod tests {
 
     #[test]
     fn service_uses_profile_prefix() {
-        assert_eq!(Cache::service("work"), "op-secrets-work");
+        assert_eq!(Cache::service("work"), "secret-env.work");
+        assert_eq!(Cache::legacy_service("work"), "op-secrets-work");
+    }
+
+    #[test]
+    fn get_moves_secrets_from_the_legacy_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::with(&[("op-secrets-personal", "GITHUB_TOKEN", "brown-fox")]);
+        let cache = Cache::new(Box::new(store.clone()), dir.path());
+
+        assert_eq!(
+            cache.get("personal", "GITHUB_TOKEN").unwrap().as_deref(),
+            Some("brown-fox")
+        );
+
+        assert_eq!(
+            store
+                .value("secret-env.personal", "GITHUB_TOKEN")
+                .as_deref(),
+            Some("brown-fox")
+        );
+        assert_eq!(store.value("op-secrets-personal", "GITHUB_TOKEN"), None);
+    }
+
+    #[test]
+    fn loaded_falls_back_to_the_legacy_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("op");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("personal.metadata"), "env:OLD\n").unwrap();
+        let cache = Cache::new(Box::new(MemoryStore::default()), &dir.path().join("new"))
+            .with_legacy_dir(Some(legacy));
+
+        assert_eq!(cache.loaded("personal").unwrap(), Some(vec!["OLD".into()]));
+
+        // Once the profile is loaded again, the current metadata wins
+        cache.save(&account()).unwrap();
+        assert_eq!(
+            cache.loaded("personal").unwrap(),
+            Some(vec!["GITHUB_TOKEN".to_string(), "my-key".to_string()])
+        );
     }
 
     #[test]
@@ -290,7 +384,7 @@ mod tests {
 
         assert_eq!(
             store
-                .value("op-secrets-personal", "GITHUB_TOKEN")
+                .value("secret-env.personal", "GITHUB_TOKEN")
                 .as_deref(),
             Some("brown-fox")
         );
@@ -340,24 +434,33 @@ mod tests {
     }
 
     #[test]
-    fn clear_deletes_configured_and_recorded_secrets() {
+    fn clear_deletes_configured_recorded_and_legacy_secrets() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::with(&[
+            ("secret-env.personal", "GITHUB_TOKEN", "a"),
             ("op-secrets-personal", "GITHUB_TOKEN", "a"),
-            ("op-secrets-personal", "REMOVED", "b"),
-            ("op-secrets-work", "GITHUB_TOKEN", "c"),
+            ("secret-env.personal", "REMOVED", "b"),
+            ("op-secrets-personal", "my-key", "c"),
+            ("secret-env.work", "GITHUB_TOKEN", "d"),
         ]);
-        let cache = Cache::new(Box::new(store.clone()), dir.path());
-        std::fs::write(cache.metadata_path("personal"), "env:REMOVED\n").unwrap();
+        let legacy = dir.path().join("op");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("personal.metadata"), "env:REMOVED\n").unwrap();
+        let cache = Cache::new(Box::new(store.clone()), &dir.path().join("new"))
+            .with_legacy_dir(Some(legacy.clone()));
 
-        assert_eq!(cache.clear(&account()).unwrap(), 2);
+        assert_eq!(cache.clear(&account()).unwrap(), 3);
 
-        assert_eq!(store.value("op-secrets-personal", "GITHUB_TOKEN"), None);
-        assert_eq!(store.value("op-secrets-personal", "REMOVED"), None);
+        for service in ["secret-env.personal", "op-secrets-personal"] {
+            for name in ["GITHUB_TOKEN", "REMOVED", "my-key"] {
+                assert_eq!(store.value(service, name), None);
+            }
+        }
         assert_eq!(
-            store.value("op-secrets-work", "GITHUB_TOKEN").as_deref(),
-            Some("c")
+            store.value("secret-env.work", "GITHUB_TOKEN").as_deref(),
+            Some("d")
         );
         assert_eq!(cache.loaded("personal").unwrap(), None);
+        assert!(!legacy.join("personal.metadata").exists());
     }
 }

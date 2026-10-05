@@ -37,7 +37,7 @@ cargo install --git https://github.com/secret-env/secret-env
 
 ## Configuration
 
-Create `~/.config/op/config.yml`:
+Create `~/.config/secret-env/config.yml` (or `$XDG_CONFIG_HOME/secret-env/config.yml`):
 
 ```yaml
 version: 1
@@ -74,11 +74,9 @@ Each account is a **profile**. Secret names of `env` and `file` secrets must be 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SECRET_ENV_CONFIG_FILE` | `~/.config/op/config.yml` | Config file location (`--config`) |
-| `SECRET_ENV_CACHE_DIR` | `~/.cache/op` | Directory recording loaded profiles (`--cache-dir`) |
-| `SECRET_ENV_DEFAULT_PROFILE` | `personal` | Profile used when none is given |
-
-The defaults are shared with zsh-op, so both use the same config and cache.
+| `SECRET_ENV_CONFIG_FILE` | `$XDG_CONFIG_HOME/secret-env/config.yml` (`~/.config/secret-env/config.yml`) | Config file (`--config`) |
+| `SECRET_ENV_STATE_DIR` | `$XDG_STATE_HOME/secret-env` (`~/.local/state/secret-env`) | Records which profiles were loaded (`--state-dir`) |
+| `SECRET_ENV_DEFAULT_PROFILE` | `personal` | Profile used when none is given (`-p`) |
 
 ## Shell integration
 
@@ -94,21 +92,11 @@ or to `~/.bashrc`:
 eval "$(secret-env init bash)"
 ```
 
-This defines a `secret-env` shell function, so the commands that set variables apply them to your current shell:
-
-```bash
-secret-env shell work -e 8h        # env + file secrets of a profile, and its SSH keys with 8h expiration
-secret-env export -p work          # env + file secrets only
-secret-env secret -x GITHUB_TOKEN  # a single secret
-```
-
-On every new shell, it also:
+This defines a `secret-env` shell function, so `load` and `export` apply secrets to your current shell. On every new shell, it also:
 
 - exports the cached secrets of the profiles you loaded before, from the keychain only, without contacting 1Password (`init zsh --no-export` turns this off),
 - completes commands, options, profile names and secret names,
 - removes the files of file secrets when the shell exits.
-
-**Coming from zsh-op?** The config, the cache and the keychain items are shared, so `secret-env init zsh` picks up where the plugin left off.
 
 ## Usage
 
@@ -116,52 +104,73 @@ On every new shell, it also:
 Usage: secret-env <COMMAND>
 
 Commands:
-  inspect  Inspect and display the configured profiles, their secrets and their cache state.
-  list     List profile names, or the secret names of a profile, one per line.
-  shell    Set up the shell environment with all secrets from a profile.
-  secret   Load an individual secret on demand.
+  load     Load secrets of a profile into the current shell.
+  read     Print the value of a secret.
   export   Export the environment and file secrets of a profile as shell statements.
   exec     Execute a command with the secrets of a profile in its environment.
-  clear    Clear the cached secrets of a profile.
+  profile  List, show and clear profiles.
   init     Print the shell integration script for zsh or bash.
 ```
 
-Without the shell integration, for example in scripts, `shell`, `export` and `secret -x` print `export` statements to evaluate yourself. A program can't change the environment of the shell that started it:
+### Loading secrets
+
+`load` puts secrets in place: environment secrets are exported, file secrets are written to private files whose paths are exported, and SSH keys are added to ssh-agent.
+
+```bash
+secret-env load -p work                  # every secret of the profile
+secret-env load -p work -e 8h            # ... with SSH keys that expire after 8 hours
+secret-env load GITHUB_TOKEN             # one secret of the default profile
+secret-env load github-work -e 4h        # one SSH key
+```
+
+Loading a whole profile records it, so its cached secrets are exported in every new shell. Loading individual secrets doesn't.
+
+### Reading and running
+
+```bash
+secret-env read GITHUB_TOKEN               # print a value (SSH keys are never printed)
+secret-env exec -p work -- terraform plan  # run one command with the secrets; files are removed afterwards
+secret-env export -p work --format json    # the secrets as a JSON object
+```
+
+Without the shell integration, for example in scripts, `load` and `export` print `export` statements to evaluate yourself, since a program can't change the environment of the shell that started it:
 
 ```bash
 eval "$(secret-env export -p work)"
 ```
 
-Other commands:
+Add `--refresh` (`-r`) to `load`, `read`, `export` or `exec` to bypass the cache and fetch from 1Password again.
+
+### Profiles
 
 ```bash
-secret-env exec -p work -- terraform plan  # run one command with the secrets; files are removed afterwards
-secret-env export -p work --format json    # the secrets as a JSON object
-secret-env secret GITHUB_TOKEN             # print a value
-secret-env secret github-work -e 4h        # add one SSH key to ssh-agent
-secret-env inspect                         # profiles, secrets and cache state (never values)
-secret-env clear -p work                   # delete the cached secrets of a profile
+secret-env profile list          # profile names
+secret-env profile show work     # account, secrets and whether it was loaded (never values)
+secret-env profile clear work    # delete its cached secrets and forget it was loaded
 ```
-
-Add `--refresh` (`-r`) to `shell`, `secret`, `export` or `exec` to bypass the cache and fetch from 1Password again.
-
-`export --all --cached` exports every previously loaded profile from the keychain only, without contacting 1Password, which is what the shell integration does on startup.
-
-File secrets are written to `--runtime-dir` when given. Otherwise `secret-env` creates a private temporary directory: the shell integration removes it when the shell exits, `exec` once the command exits, and otherwise you are told to remove it when done.
 
 ## How It Works
 
 1. **Configuration**: profiles map secret names to `op://` references.
 2. **1Password CLI**: secrets are fetched with `op read` when they aren't cached, so `op` can still ask for authorization.
-3. **Keychain cache**: values are stored as generic passwords, service `op-secrets-<profile>`, account `<secret name>`. Loaded profiles are recorded in `<cache dir>/<profile>.metadata`.
-4. **Output**: `export` statements single-quote every value, so quotes, `$`, backticks and newlines survive `eval` unchanged.
+3. **Keychain cache**: values are stored as generic passwords, service `secret-env.<profile>`, account `<secret name>`. Loaded profiles are recorded in `<state dir>/<profile>.metadata`.
+4. **Output**: `export` statements single-quote every value, so quotes, `$`, backticks and newlines survive `eval` unchanged. Under the shell integration they travel on file descriptor 3, so values, JSON, help and errors still go straight to the terminal.
 5. **SSH agent**: keys are piped to `ssh-add -` with your expiration. A key the agent already holds is left alone unless you pass `--refresh`.
+6. **File secrets** are written to `--runtime-dir` when given, otherwise to a private temporary directory: the shell integration removes it when the shell exits, `exec` once the command exits, and otherwise you are told to remove it.
+
+### Coming from zsh-op
+
+secret-env picks up where the zsh-op plugin left off:
+
+- With no config at the new location, `~/.config/op/config.yml` is used, with a hint to move it.
+- Profiles recorded in `~/.cache/op` count as loaded until you load them again.
+- Secrets cached under `op-secrets-<profile>` move to `secret-env.<profile>` the first time they are read; the old items are deleted.
 
 ## Troubleshooting
 
 **"not signed in to 1Password account"**: run `op signin --account my.1password.com`.
 
-**macOS asks to allow `secret-env` access to the keychain**: secrets cached by other programs (for example older zsh-op versions, which used `/usr/bin/security`) need your approval once per item. Choose **Always Allow**. Locally built binaries are not signed with a stable identity, so the prompt can come back after an upgrade. Alternatively, run `secret-env clear -p <profile>` and then `secret-env shell -r <profile>` to re-cache the secrets.
+**macOS asks to allow `secret-env` access to the keychain**: secrets cached by other programs (for example older zsh-op versions, which used `/usr/bin/security`) need your approval once per item. Choose **Always Allow**. Locally built binaries are not signed with a stable identity, so the prompt can come back after an upgrade. Alternatively, run `secret-env profile clear <profile>` and then `secret-env load -r -p <profile>` to re-cache the secrets.
 
 **"SSH agent is not running"**: start one with `eval $(ssh-agent)`.
 

@@ -6,13 +6,13 @@
 
 typeset -g _SECRET_ENV_BIN={{bin}}
 
-# Wrap the binary, so that `shell`, `export` and `secret --export` change the
-# current shell. The binary writes the shell statements to fd 3, which is
-# captured and evaluated; everything else (values, JSON, help, errors) goes
-# straight to the terminal.
+# Wrap the binary, so that `load` and `export` change the current shell. The
+# binary writes the shell statements to fd 3, which is captured and
+# evaluated; everything else (values, JSON, help, errors) goes straight to
+# the terminal.
 secret-env() {
     case "$1" in
-    shell | export | secret) ;;
+    load | export) ;;
     *)
         command "$_SECRET_ENV_BIN" "$@"
         return

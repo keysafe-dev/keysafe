@@ -88,82 +88,9 @@ fn resolve_cached(
     Ok(loader.resolve(runtime, account, secrets, Source::Cache))
 }
 
-/// Inspect and display the configured profiles, their secrets and their cache state.
-pub struct InspectCommand {
-    /// Writer used to output the inspected profiles.
-    pub writer: Box<dyn Write>,
-    /// Cache used to tell which profiles were loaded.
-    pub cache: Cache,
-}
-
-impl InspectCommand {
-    /// Execute the InspectCommand with the provided arguments.
-    pub fn execute(&mut self, args: &InspectCommandArgs) -> Result<()> {
-        let config = Config::read_from_file(&args.parent.config)?;
-        let accounts = match &args.profile {
-            Some(profile) => vec![config.profile(profile)?],
-            None => config.accounts.iter().collect(),
-        };
-
-        for (i, account) in accounts.iter().enumerate() {
-            if i > 0 {
-                writeln!(self.writer)?;
-            }
-            let loaded = self.cache.loaded(&account.name)?.is_some();
-            writeln!(self.writer, "Profile: {}", account.name)?;
-            writeln!(self.writer, "  Account: {}", account.account)?;
-            writeln!(
-                self.writer,
-                "  Loaded: {}",
-                if loaded { "yes" } else { "no" }
-            )?;
-            if !account.secrets.is_empty() {
-                writeln!(self.writer, "  Secrets:")?;
-                for secret in &account.secrets {
-                    let kind = secret.kind.to_string();
-                    writeln!(
-                        self.writer,
-                        "    {kind:<4} {} ({})",
-                        secret.name, secret.path
-                    )?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// List profile names, or the secret names of a profile, one per line.
-pub struct ListCommand {
-    /// Writer used to output the names.
-    pub writer: Box<dyn Write>,
-}
-
-impl ListCommand {
-    /// Execute the ListCommand with the provided arguments.
-    pub fn execute(&mut self, args: &ListCommandArgs) -> Result<()> {
-        let config = Config::read_from_file(&args.parent.config)?;
-        match &args.profile {
-            Some(profile) => {
-                for secret in &config.profile(profile)?.secrets {
-                    writeln!(self.writer, "{}", secret.name)?;
-                }
-            }
-            None => {
-                for account in &config.accounts {
-                    writeln!(self.writer, "{}", account.name)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Set up the shell environment with all secrets from a profile.
-pub struct ShellCommand {
-    /// Writer used to output the export statements.
+/// Load secrets of a profile into the current shell.
+pub struct LoadCommand {
+    /// Writer used to output the shell statements.
     pub writer: Box<dyn Write>,
     /// Loader used to resolve the secrets.
     pub loader: Loader,
@@ -171,18 +98,26 @@ pub struct ShellCommand {
     pub agent: Box<dyn KeyAgent>,
 }
 
-impl ShellCommand {
-    /// Execute the ShellCommand with the provided arguments.
-    pub fn execute(&mut self, args: &ShellCommandArgs) -> Result<()> {
+impl LoadCommand {
+    /// Execute the LoadCommand with the provided arguments.
+    pub fn execute(&mut self, args: &LoadCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
         let account = config.profile(&args.profile)?;
+        let secrets: Vec<&Secret> = if args.names.is_empty() {
+            account.secrets.iter().collect()
+        } else {
+            args.names
+                .iter()
+                .map(|name| account.secret(name))
+                .collect::<Result<_>>()?
+        };
         let runtime = RuntimeDir::new(args.output.runtime_dir.clone());
 
         // Export the environment and file secrets
-        let secrets = account.secrets.iter().filter(|s| s.is_variable());
+        let variables = secrets.iter().copied().filter(|s| s.is_variable());
         let (variables, mut failed) =
             self.loader
-                .resolve(&runtime, account, secrets, Source::Any(args.refresh));
+                .resolve(&runtime, account, variables, Source::Any(args.refresh));
         let format = args.output.export_format();
         write_runtime_dir(&mut self.writer, format, &runtime, args.output.is_eval())?;
         write_variables(&mut self.writer, format, &variables)?;
@@ -194,118 +129,91 @@ impl ShellCommand {
         }
 
         // Add the SSH keys to the agent
-        let keys: Vec<&Secret> = account
-            .secrets
+        let keys: Vec<&Secret> = secrets
             .iter()
+            .copied()
             .filter(|s| s.kind == SecretKind::Ssh)
             .collect();
-        if !keys.is_empty() {
-            match self.agent.fingerprints() {
-                Ok(present) => {
-                    let mut loaded = 0;
-                    for key in &keys {
-                        match self.loader.add_key(
-                            self.agent.as_ref(),
-                            &present,
-                            account,
-                            key,
-                            &args.expiration,
-                            args.refresh,
-                        ) {
-                            Ok(_) => loaded += 1,
-                            Err(err) => {
-                                warn(format!("failed to load SSH key '{}': {err:#}", key.name));
-                                failed += 1;
-                            }
-                        }
-                    }
-                    if loaded > 0 {
-                        info(format!(
-                            "loaded {loaded} SSH key(s) with {} expiration",
-                            args.expiration
-                        ));
-                    }
-                }
-                Err(err) => {
-                    warn(format!("failed to load {} SSH key(s): {err:#}", keys.len()));
-                    failed += keys.len();
-                }
-            }
-        }
+        failed += self.add_keys(account, &keys, args);
 
-        // Record the profile so its cached secrets are exported on shell startup
-        self.loader.cache.save(account)?;
+        // Record a fully loaded profile, so its cached secrets are exported in new shells
+        if args.names.is_empty() {
+            self.loader.cache.save(account)?;
+        }
         finish(failed)
     }
-}
 
-/// Load an individual secret on demand.
-pub struct SecretCommand {
-    /// Writer used to output the secret value or path.
-    pub writer: Box<dyn Write>,
-    /// Writer used to output shell statements: the export statement, and the runtime directory
-    /// for the shell integration.
-    pub statements: Box<dyn Write>,
-    /// Loader used to resolve the secret.
-    pub loader: Loader,
-    /// Agent SSH keys are added to.
-    pub agent: Box<dyn KeyAgent>,
-}
-
-impl SecretCommand {
-    /// Execute the SecretCommand with the provided arguments.
-    pub fn execute(&mut self, args: &SecretCommandArgs) -> Result<()> {
-        let config = Config::read_from_file(&args.parent.config)?;
-        let account = config.profile(&args.profile)?;
-        let secret = account.secret(&args.name)?;
-
-        if secret.kind == SecretKind::Ssh {
-            if args.export {
-                warn("--export is not valid for SSH keys (ignored)");
+    /// Adds `keys` to the agent, reporting what happened. Returns the number of failures.
+    fn add_keys(&self, account: &Account, keys: &[&Secret], args: &LoadCommandArgs) -> usize {
+        if keys.is_empty() {
+            return 0;
+        }
+        let present = match self.agent.fingerprints() {
+            Ok(present) => present,
+            Err(err) => {
+                warn(format!("failed to load {} SSH key(s): {err:#}", keys.len()));
+                return keys.len();
             }
-            let present = self.agent.fingerprints()?;
-            let added = self.loader.add_key(
+        };
+
+        let (mut added, mut kept, mut failed) = (0, 0, 0);
+        for key in keys {
+            match self.loader.add_key(
                 self.agent.as_ref(),
                 &present,
                 account,
-                secret,
+                key,
                 &args.expiration,
                 args.refresh,
-            )?;
-            if added {
-                info(format!(
-                    "SSH key '{}' loaded with {} expiration",
-                    secret.name, args.expiration
-                ));
-            } else {
-                info(format!(
-                    "SSH key '{}' is already in the agent (use --refresh to reset its expiration)",
-                    secret.name
-                ));
-            }
-            return Ok(());
-        }
-
-        let runtime = RuntimeDir::new(args.output.runtime_dir.clone());
-        let (variables, failed) =
-            self.loader
-                .resolve(&runtime, account, [secret], Source::Any(args.refresh));
-        finish(failed)?;
-
-        let format = args.output.export_format();
-        write_runtime_dir(
-            &mut self.statements,
-            format,
-            &runtime,
-            args.output.is_eval(),
-        )?;
-        if args.export {
-            write_variables(&mut self.statements, format, &variables)?;
-        } else {
-            for variable in &variables {
-                writeln!(self.writer, "{}", variable.value)?;
+            ) {
+                Ok(true) => added += 1,
+                Ok(false) => kept += 1,
+                Err(err) => {
+                    warn(format!("failed to load SSH key '{}': {err:#}", key.name));
+                    failed += 1;
+                }
             }
         }
+
+        if added > 0 {
+            info(format!(
+                "added {added} SSH key(s) with {} expiration",
+                args.expiration
+            ));
+        }
+        if kept > 0 {
+            info(format!(
+                "{kept} SSH key(s) already in the agent (use --refresh to reset their expiration)"
+            ));
+        }
+        failed
+    }
+}
+
+/// Print the value of a secret.
+pub struct ReadCommand {
+    /// Writer used to output the value.
+    pub writer: Box<dyn Write>,
+    /// Loader used to resolve the secret.
+    pub loader: Loader,
+}
+
+impl ReadCommand {
+    /// Execute the ReadCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ReadCommandArgs) -> Result<()> {
+        let config = Config::read_from_file(&args.parent.config)?;
+        let account = config.profile(&args.profile)?;
+        let secret = account.secret(&args.name)?;
+        if secret.kind == SecretKind::Ssh {
+            bail!(
+                "'{}' is an SSH key, which is not printed; use `secret-env load {}` to add it to ssh-agent",
+                secret.name,
+                secret.name
+            );
+        }
+
+        let value = self.loader.load(account, secret, args.refresh)?;
+        writeln!(self.writer, "{value}")?;
         Ok(())
     }
 }
@@ -366,22 +274,7 @@ fn completion(shell: Shell, config: Option<&Config>) -> Result<String> {
             .collect();
         secrets.sort();
         secrets.dedup();
-
-        let subcommands: Vec<String> = command
-            .get_subcommands()
-            .filter(|c| c.get_arguments().any(|a| a.get_id() == "profile"))
-            .map(|c| c.get_name().to_string())
-            .collect();
-        for name in subcommands {
-            let profiles = PossibleValuesParser::new(profiles.clone());
-            command = command
-                .mut_subcommand(name, |c| c.mut_arg("profile", |a| a.value_parser(profiles)));
-        }
-        command = command.mut_subcommand("secret", |c| {
-            c.mut_arg("name", |a| {
-                a.value_parser(PossibleValuesParser::new(secrets))
-            })
-        });
+        command = complete_names(command, &profiles, &secrets);
     }
 
     let shell = match shell {
@@ -391,6 +284,30 @@ fn completion(shell: Shell, config: Option<&Config>) -> Result<String> {
     let mut out = Vec::new();
     clap_complete::generate(shell, &mut command, "secret-env", &mut out);
     Ok(String::from_utf8(out)?)
+}
+
+/// Offers `profiles` for every `profile` argument and `secrets` for every secret name
+/// argument of `command` and its subcommands.
+fn complete_names(
+    mut command: clap::Command,
+    profiles: &[String],
+    secrets: &[String],
+) -> clap::Command {
+    for (id, values) in [("profile", profiles), ("name", secrets), ("names", secrets)] {
+        if command.get_arguments().any(|a| a.get_id() == id) {
+            let values = PossibleValuesParser::new(values.to_vec());
+            command = command.mut_arg(id, |a| a.value_parser(values));
+        }
+    }
+
+    let subcommands: Vec<String> = command
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    for name in subcommands {
+        command = command.mut_subcommand(name, |c| complete_names(c, profiles, secrets));
+    }
+    command
 }
 
 /// Print the shell integration script for zsh or bash.
@@ -523,15 +440,79 @@ impl Drop for SignalGuard {
     }
 }
 
+/// List the profile names, one per line.
+pub struct ProfileListCommand {
+    /// Writer used to output the names.
+    pub writer: Box<dyn Write>,
+}
+
+impl ProfileListCommand {
+    /// Execute the ProfileListCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ProfileListCommandArgs) -> Result<()> {
+        let config = Config::read_from_file(&args.parent.config)?;
+        for account in &config.accounts {
+            writeln!(self.writer, "{}", account.name)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Show profiles, their secrets and whether they were loaded.
+pub struct ProfileShowCommand {
+    /// Writer used to output the profiles.
+    pub writer: Box<dyn Write>,
+    /// Cache used to tell which profiles were loaded.
+    pub cache: Cache,
+}
+
+impl ProfileShowCommand {
+    /// Execute the ProfileShowCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ProfileShowCommandArgs) -> Result<()> {
+        let config = Config::read_from_file(&args.parent.config)?;
+        let accounts = match &args.profile {
+            Some(profile) => vec![config.profile(profile)?],
+            None => config.accounts.iter().collect(),
+        };
+
+        for (i, account) in accounts.iter().enumerate() {
+            if i > 0 {
+                writeln!(self.writer)?;
+            }
+            let loaded = self.cache.loaded(&account.name)?.is_some();
+            writeln!(self.writer, "Profile: {}", account.name)?;
+            writeln!(self.writer, "  Account: {}", account.account)?;
+            writeln!(
+                self.writer,
+                "  Loaded: {}",
+                if loaded { "yes" } else { "no" }
+            )?;
+            if !account.secrets.is_empty() {
+                writeln!(self.writer, "  Secrets:")?;
+                for secret in &account.secrets {
+                    let kind = secret.kind.to_string();
+                    writeln!(
+                        self.writer,
+                        "    {kind:<4} {} ({})",
+                        secret.name, secret.path
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Clear the cached secrets of a profile.
-pub struct ClearCommand {
+pub struct ProfileClearCommand {
     /// Cache the secrets are deleted from.
     pub cache: Cache,
 }
 
-impl ClearCommand {
-    /// Execute the ClearCommand with the provided arguments.
-    pub fn execute(&mut self, args: &ClearCommandArgs) -> Result<()> {
+impl ProfileClearCommand {
+    /// Execute the ProfileClearCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ProfileClearCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
         let account = config.profile(&args.profile)?;
 
@@ -633,7 +614,7 @@ mod tests {
         fn parent(&self) -> ProgramArgs {
             ProgramArgs {
                 config: self.dir.path().join("config.yml"),
-                cache_dir: self.dir.path().join("cache"),
+                state_dir: self.dir.path().join("cache"),
             }
         }
 
@@ -689,9 +670,10 @@ mod tests {
         agent
     }
 
-    fn shell_args(fixture: &Fixture, refresh: bool) -> ShellCommandArgs {
-        ShellCommandArgs {
+    fn load_args(fixture: &Fixture, names: &[&str], refresh: bool) -> LoadCommandArgs {
+        LoadCommandArgs {
             parent: fixture.parent(),
+            names: names.iter().map(|n| n.to_string()).collect(),
             profile: "personal".into(),
             expiration: "1h".into(),
             refresh,
@@ -699,15 +681,12 @@ mod tests {
         }
     }
 
-    fn secret_args(fixture: &Fixture, name: &str, export: bool) -> SecretCommandArgs {
-        SecretCommandArgs {
+    fn read_args(fixture: &Fixture, name: &str) -> ReadCommandArgs {
+        ReadCommandArgs {
             parent: fixture.parent(),
             name: name.into(),
             profile: "personal".into(),
-            export,
-            expiration: "8h".into(),
             refresh: false,
-            output: fixture.output(ExportFormat::Zsh),
         }
     }
 
@@ -776,15 +755,15 @@ mod tests {
     }
 
     #[test]
-    fn inspect_writes_profiles() -> Result<()> {
+    fn profile_show_writes_profiles() -> Result<()> {
         let fixture = Fixture::new().loaded("personal", "env:GITHUB_TOKEN\n");
         let writer = Writer::new();
-        let mut cmd = InspectCommand {
+        let mut cmd = ProfileShowCommand {
             writer: Box::new(writer.clone()),
             cache: fixture.cache(),
         };
 
-        cmd.execute(&InspectCommandArgs {
+        cmd.execute(&ProfileShowCommandArgs {
             parent: fixture.parent(),
             profile: None,
         })?;
@@ -809,14 +788,14 @@ mod tests {
     }
 
     #[test]
-    fn inspect_fails_for_unknown_profile() {
+    fn profile_show_fails_for_unknown_profile() {
         let fixture = Fixture::new();
-        let mut cmd = InspectCommand {
+        let mut cmd = ProfileShowCommand {
             writer: Box::new(Writer::new()),
             cache: fixture.cache(),
         };
 
-        let result = cmd.execute(&InspectCommandArgs {
+        let result = cmd.execute(&ProfileShowCommandArgs {
             parent: fixture.parent(),
             profile: Some("staging".into()),
         });
@@ -828,16 +807,15 @@ mod tests {
     }
 
     #[test]
-    fn list_writes_profile_names() -> Result<()> {
+    fn profile_list_writes_profile_names() -> Result<()> {
         let fixture = Fixture::new();
         let writer = Writer::new();
-        let mut cmd = ListCommand {
+        let mut cmd = ProfileListCommand {
             writer: Box::new(writer.clone()),
         };
 
-        cmd.execute(&ListCommandArgs {
+        cmd.execute(&ProfileListCommandArgs {
             parent: fixture.parent(),
-            profile: None,
         })?;
 
         assert_eq!(writer.contents(), "personal\nwork\n");
@@ -845,24 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn list_writes_secret_names_of_profile() -> Result<()> {
-        let fixture = Fixture::new();
-        let writer = Writer::new();
-        let mut cmd = ListCommand {
-            writer: Box::new(writer.clone()),
-        };
-
-        cmd.execute(&ListCommandArgs {
-            parent: fixture.parent(),
-            profile: Some("personal".into()),
-        })?;
-
-        assert_eq!(writer.contents(), "GITHUB_TOKEN\nGCP_CREDENTIALS\nmy-key\n");
-        Ok(())
-    }
-
-    #[test]
-    fn shell_loads_cached_secrets_without_contacting_1password() -> Result<()> {
+    fn load_loads_cached_profile_without_contacting_1password() -> Result<()> {
         let fixture = Fixture::new()
             .cached("personal", "GITHUB_TOKEN", "brown-fox")
             .cached("personal", "GCP_CREDENTIALS", "{\"type\":\"sa\"}")
@@ -874,13 +835,13 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(()));
         let writer = Writer::new();
-        let mut cmd = ShellCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
             agent: Box::new(agent),
         };
 
-        cmd.execute(&shell_args(&fixture, false))?;
+        cmd.execute(&load_args(&fixture, &[], false))?;
 
         let file = fixture.file("personal", "GCP_CREDENTIALS");
         assert_eq!(
@@ -903,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_fetches_uncached_secrets_and_caches_them() -> Result<()> {
+    fn load_fetches_uncached_secrets_and_caches_them() -> Result<()> {
         let fixture = Fixture::new();
         let mut client = MockSecretClient::new();
         expect_read(&mut client, "op://Personal/GitHub/token", "brown-fox");
@@ -915,13 +876,13 @@ mod tests {
         );
         let mut agent = agent(vec![]);
         agent.expect_add().times(1).returning(|_, _| Ok(()));
-        let mut cmd = ShellCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(Writer::new()),
             loader: fixture.loader(client),
             agent: Box::new(agent),
         };
 
-        cmd.execute(&shell_args(&fixture, false))?;
+        cmd.execute(&load_args(&fixture, &[], false))?;
 
         assert_eq!(
             fixture.value("personal", "GITHUB_TOKEN").as_deref(),
@@ -939,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_refresh_bypasses_cache_and_readds_keys() -> Result<()> {
+    fn load_refresh_bypasses_cache_and_readds_keys() -> Result<()> {
         let fixture = Fixture::new()
             .cached("personal", "GITHUB_TOKEN", "stale")
             .cached("personal", "GCP_CREDENTIALS", "stale")
@@ -954,13 +915,13 @@ mod tests {
         );
         let mut agent = agent(vec![fingerprint(&TEST_KEY)?]);
         agent.expect_add().times(1).returning(|_, _| Ok(()));
-        let mut cmd = ShellCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(Writer::new()),
             loader: fixture.loader(client),
             agent: Box::new(agent),
         };
 
-        cmd.execute(&shell_args(&fixture, true))?;
+        cmd.execute(&load_args(&fixture, &[], true))?;
 
         assert_eq!(
             fixture.value("personal", "GITHUB_TOKEN").as_deref(),
@@ -970,24 +931,24 @@ mod tests {
     }
 
     #[test]
-    fn shell_skips_keys_already_in_agent() -> Result<()> {
+    fn load_skips_keys_already_in_agent() -> Result<()> {
         let fixture = Fixture::new()
             .cached("personal", "GITHUB_TOKEN", "a")
             .cached("personal", "GCP_CREDENTIALS", "b")
             .cached("personal", "my-key", &TEST_KEY);
         let mut agent = agent(vec![fingerprint(&TEST_KEY)?]);
         agent.expect_add().never();
-        let mut cmd = ShellCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(Writer::new()),
             loader: fixture.loader(offline()),
             agent: Box::new(agent),
         };
 
-        cmd.execute(&shell_args(&fixture, false))
+        cmd.execute(&load_args(&fixture, &[], false))
     }
 
     #[test]
-    fn shell_continues_past_failing_secrets() -> Result<()> {
+    fn load_continues_past_failing_secrets() -> Result<()> {
         let fixture = Fixture::new().cached("personal", "GCP_CREDENTIALS", "{}");
         let mut client = MockSecretClient::new();
         client
@@ -999,13 +960,13 @@ mod tests {
             .expect_fingerprints()
             .returning(|| Err(anyhow::anyhow!("SSH agent is not running")));
         let writer = Writer::new();
-        let mut cmd = ShellCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(client),
             agent: Box::new(agent),
         };
 
-        let result = cmd.execute(&shell_args(&fixture, false));
+        let result = cmd.execute(&load_args(&fixture, &[], false));
 
         assert_eq!(
             result.unwrap_err().to_string(),
@@ -1017,62 +978,25 @@ mod tests {
     }
 
     #[test]
-    fn secret_prints_env_value() -> Result<()> {
+    fn load_named_secrets_does_not_record_the_profile() -> Result<()> {
         let fixture = Fixture::new().cached("personal", "GITHUB_TOKEN", "brown-fox");
         let writer = Writer::new();
-        let mut cmd = SecretCommand {
+        // No SSH key is selected, so the agent must not be contacted
+        let mut cmd = LoadCommand {
             writer: Box::new(writer.clone()),
-            statements: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
             agent: Box::new(MockKeyAgent::new()),
         };
 
-        cmd.execute(&secret_args(&fixture, "GITHUB_TOKEN", false))?;
-
-        assert_eq!(writer.contents(), "brown-fox\n");
-        Ok(())
-    }
-
-    #[test]
-    fn secret_exports_env_value() -> Result<()> {
-        let fixture = Fixture::new().cached("personal", "GITHUB_TOKEN", "brown-fox");
-        let writer = Writer::new();
-        let mut cmd = SecretCommand {
-            writer: Box::new(writer.clone()),
-            statements: Box::new(writer.clone()),
-            loader: fixture.loader(offline()),
-            agent: Box::new(MockKeyAgent::new()),
-        };
-
-        cmd.execute(&secret_args(&fixture, "GITHUB_TOKEN", true))?;
+        cmd.execute(&load_args(&fixture, &["GITHUB_TOKEN"], false))?;
 
         assert_eq!(writer.contents(), "export GITHUB_TOKEN='brown-fox'\n");
+        assert_eq!(fixture.cache().loaded("personal")?, None);
         Ok(())
     }
 
     #[test]
-    fn secret_writes_file_and_prints_path() -> Result<()> {
-        let fixture = Fixture::new();
-        let mut client = MockSecretClient::new();
-        expect_read(&mut client, "op://Personal/GCP/credentials", "{}");
-        let writer = Writer::new();
-        let mut cmd = SecretCommand {
-            writer: Box::new(writer.clone()),
-            statements: Box::new(writer.clone()),
-            loader: fixture.loader(client),
-            agent: Box::new(MockKeyAgent::new()),
-        };
-
-        cmd.execute(&secret_args(&fixture, "GCP_CREDENTIALS", false))?;
-
-        let file = fixture.file("personal", "GCP_CREDENTIALS");
-        assert_eq!(writer.contents(), format!("{}\n", file.display()));
-        assert_eq!(std::fs::read_to_string(file)?, "{}");
-        Ok(())
-    }
-
-    #[test]
-    fn secret_adds_ssh_key_with_expiration() -> Result<()> {
+    fn load_named_ssh_key_adds_it_with_expiration() -> Result<()> {
         let fixture = Fixture::new().cached("personal", "my-key", &TEST_KEY);
         let mut agent = agent(vec![]);
         agent
@@ -1081,35 +1005,87 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(()));
         let writer = Writer::new();
-        let mut cmd = SecretCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(writer.clone()),
-            statements: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
             agent: Box::new(agent),
         };
 
-        cmd.execute(&secret_args(&fixture, "my-key", true))?;
+        cmd.execute(&LoadCommandArgs {
+            expiration: "8h".into(),
+            ..load_args(&fixture, &["my-key"], false)
+        })?;
 
         assert_eq!(writer.contents(), "");
         Ok(())
     }
 
     #[test]
-    fn secret_fails_for_unknown_secret() {
+    fn load_fails_for_unknown_secret() {
         let fixture = Fixture::new();
-        let mut cmd = SecretCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(Writer::new()),
-            statements: Box::new(Writer::new()),
             loader: fixture.loader(offline()),
             agent: Box::new(MockKeyAgent::new()),
         };
 
-        let result = cmd.execute(&secret_args(&fixture, "NOPE", false));
+        let result = cmd.execute(&load_args(&fixture, &["GITHUB_TOKEN", "NOPE"], false));
 
         assert!(result
             .unwrap_err()
             .to_string()
             .starts_with("secret 'NOPE' not found in profile 'personal'"));
+    }
+
+    #[test]
+    fn read_prints_env_value() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "GITHUB_TOKEN", "brown-fox");
+        let writer = Writer::new();
+        let mut cmd = ReadCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+        };
+
+        cmd.execute(&read_args(&fixture, "GITHUB_TOKEN"))?;
+
+        assert_eq!(writer.contents(), "brown-fox\n");
+        Ok(())
+    }
+
+    #[test]
+    fn read_prints_file_contents_without_writing_a_file() -> Result<()> {
+        let fixture = Fixture::new();
+        let mut client = MockSecretClient::new();
+        expect_read(&mut client, "op://Personal/GCP/credentials", "{}");
+        let writer = Writer::new();
+        let mut cmd = ReadCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(client),
+        };
+
+        cmd.execute(&read_args(&fixture, "GCP_CREDENTIALS"))?;
+
+        assert_eq!(writer.contents(), "{}\n");
+        assert!(!fixture.runtime_dir().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn read_refuses_ssh_keys() {
+        let fixture = Fixture::new().cached("personal", "my-key", &TEST_KEY);
+        let writer = Writer::new();
+        let mut cmd = ReadCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+        };
+
+        let result = cmd.execute(&read_args(&fixture, "my-key"));
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "'my-key' is an SSH key, which is not printed; use `secret-env load my-key` to add it to ssh-agent"
+        );
+        assert_eq!(writer.contents(), "");
     }
 
     #[test]
@@ -1425,23 +1401,20 @@ mod tests {
     }
 
     #[test]
-    fn shell_in_eval_mode_hands_runtime_dir_to_the_shell() -> Result<()> {
+    fn load_in_eval_mode_hands_runtime_dir_to_the_shell() -> Result<()> {
         let fixture = Fixture::new()
             .cached("personal", "GITHUB_TOKEN", "a")
-            .cached("personal", "GCP_CREDENTIALS", "{}")
-            .cached("personal", "my-key", &TEST_KEY);
-        let mut agent = agent(vec![]);
-        agent.expect_add().returning(|_, _| Ok(()));
+            .cached("personal", "GCP_CREDENTIALS", "{}");
         let writer = Writer::new();
-        let mut cmd = ShellCommand {
+        let mut cmd = LoadCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
-            agent: Box::new(agent),
+            agent: Box::new(MockKeyAgent::new()),
         };
 
-        cmd.execute(&ShellCommandArgs {
+        cmd.execute(&LoadCommandArgs {
             output: eval_output(Shell::Zsh),
-            ..shell_args(&fixture, false)
+            ..load_args(&fixture, &["GITHUB_TOKEN", "GCP_CREDENTIALS"], false)
         })?;
 
         let output = writer.contents();
@@ -1453,42 +1426,16 @@ mod tests {
     }
 
     #[test]
-    fn secret_in_eval_mode_prints_path_and_hands_runtime_dir_to_the_shell() -> Result<()> {
-        let fixture = Fixture::new().cached("personal", "GCP_CREDENTIALS", "{}");
-        let (writer, statements) = (Writer::new(), Writer::new());
-        let mut cmd = SecretCommand {
-            writer: Box::new(writer.clone()),
-            statements: Box::new(statements.clone()),
-            loader: fixture.loader(offline()),
-            agent: Box::new(MockKeyAgent::new()),
-        };
-
-        cmd.execute(&SecretCommandArgs {
-            output: eval_output(Shell::Bash),
-            ..secret_args(&fixture, "GCP_CREDENTIALS", false)
-        })?;
-
-        let dir = assigned_runtime_dir(&statements.contents()).unwrap();
-        assert!(statements
-            .contents()
-            .starts_with("_SECRET_ENV_RUNTIME_DIR='"));
-        let file = dir.join("files/personal/GCP_CREDENTIALS");
-        assert_eq!(writer.contents(), format!("{}\n", file.display()));
-        std::fs::remove_dir_all(dir)?;
-        Ok(())
-    }
-
-    #[test]
-    fn clear_deletes_cached_secrets() -> Result<()> {
+    fn profile_clear_deletes_cached_secrets() -> Result<()> {
         let fixture = Fixture::new()
             .cached("personal", "GITHUB_TOKEN", "a")
             .cached("work", "API_KEY", "b")
             .loaded("personal", "env:GITHUB_TOKEN\n");
-        let mut cmd = ClearCommand {
+        let mut cmd = ProfileClearCommand {
             cache: fixture.cache(),
         };
 
-        cmd.execute(&ClearCommandArgs {
+        cmd.execute(&ProfileClearCommandArgs {
             parent: fixture.parent(),
             profile: "personal".into(),
         })?;
