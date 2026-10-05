@@ -1,0 +1,33 @@
+[package]
+name = "secret-env"
+version = "0.0.0"
+edition = "2021"
+description = "Load 1Password secrets into your shell: cached in the system keychain, exported as environment variables or files, and added to ssh-agent"
+license = "MIT"
+documentation = "https://github.com/secret-env/secret-env"
+homepage = "https://github.com/secret-env/secret-env"
+repository = "https://github.com/secret-env/secret-env"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+keyring-core = "1.0.0"
+libc = "0.2.190"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml_ng = "0.10.0"
+ssh-key = "0.6.7"
+tempfile = "3.27.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+indoc = "2.0.7"
+mockall = "0.15.0"
+predicates = "3.1.4"
+ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
