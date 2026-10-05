@@ -2,8 +2,10 @@ use crate::app::args::*;
 use crate::log::{info, warn};
 use crate::vault::*;
 use anyhow::{bail, Context, Result};
+use clap::{builder::PossibleValuesParser, CommandFactory};
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
 /// Fails when any secret failed to load. The warnings were already printed.
@@ -40,6 +42,50 @@ fn write_variables(
         }
     }
     Ok(())
+}
+
+/// Hands the temporary directory `runtime` created for file secrets, if any, to whoever removes
+/// it: the shell integration, through a statement it evaluates, or the user.
+fn write_runtime_dir(
+    writer: &mut dyn Write,
+    format: ExportFormat,
+    runtime: &RuntimeDir,
+    eval: bool,
+) -> Result<()> {
+    let Some(dir) = runtime.created() else {
+        return Ok(());
+    };
+
+    let path = quote(&dir.to_string_lossy());
+    match (eval, format) {
+        (true, ExportFormat::Zsh) => writeln!(writer, "typeset -g _SECRET_ENV_RUNTIME_DIR={path}")?,
+        (true, ExportFormat::Bash) => writeln!(writer, "_SECRET_ENV_RUNTIME_DIR={path}")?,
+        _ => warn(format!(
+            "file secrets are written to {}; remove it when done",
+            dir.display()
+        )),
+    }
+    Ok(())
+}
+
+/// Resolves the cached env and file secrets of `account` from the keychain only, if the
+/// profile was loaded before. Only secrets that are still configured are exported, and their
+/// kind always comes from the current config.
+fn resolve_cached(
+    loader: &Loader,
+    runtime: &RuntimeDir,
+    account: &Account,
+) -> Result<(Vec<Variable>, usize)> {
+    let Some(names) = loader.cache.loaded(&account.name)? else {
+        return Ok((Vec::new(), 0));
+    };
+
+    let secrets = account
+        .secrets
+        .iter()
+        .filter(|s| s.is_variable())
+        .filter(|s| names.contains(&s.name));
+    Ok(loader.resolve(runtime, account, secrets, Source::Cache))
 }
 
 /// Inspect and display the configured profiles, their secrets and their cache state.
@@ -137,7 +183,9 @@ impl ShellCommand {
         let (variables, mut failed) =
             self.loader
                 .resolve(&runtime, account, secrets, Source::Any(args.refresh));
-        write_variables(&mut self.writer, args.output.export_format(), &variables)?;
+        let format = args.output.export_format();
+        write_runtime_dir(&mut self.writer, format, &runtime, args.output.is_eval())?;
+        write_variables(&mut self.writer, format, &variables)?;
         if !variables.is_empty() {
             info(format!(
                 "loaded {} environment and file secret(s)",
@@ -193,8 +241,11 @@ impl ShellCommand {
 
 /// Load an individual secret on demand.
 pub struct SecretCommand {
-    /// Writer used to output the secret value, path or export statement.
+    /// Writer used to output the secret value or path.
     pub writer: Box<dyn Write>,
+    /// Writer used to output shell statements: the export statement, and the runtime directory
+    /// for the shell integration.
+    pub statements: Box<dyn Write>,
     /// Loader used to resolve the secret.
     pub loader: Loader,
     /// Agent SSH keys are added to.
@@ -241,8 +292,15 @@ impl SecretCommand {
                 .resolve(&runtime, account, [secret], Source::Any(args.refresh));
         finish(failed)?;
 
+        let format = args.output.export_format();
+        write_runtime_dir(
+            &mut self.statements,
+            format,
+            &runtime,
+            args.output.is_eval(),
+        )?;
         if args.export {
-            write_variables(&mut self.writer, args.output.export_format(), &variables)?;
+            write_variables(&mut self.statements, format, &variables)?;
         } else {
             for variable in &variables {
                 writeln!(self.writer, "{}", variable.value)?;
@@ -275,18 +333,7 @@ impl ExportCommand {
         let mut failed = 0;
         for account in accounts {
             let (mut resolved, count) = if args.cached {
-                // Only profiles loaded before are exported, and only the secrets that are
-                // still configured. The kind always comes from the current config.
-                let Some(names) = self.loader.cache.loaded(&account.name)? else {
-                    continue;
-                };
-                let secrets = account
-                    .secrets
-                    .iter()
-                    .filter(|s| s.is_variable())
-                    .filter(|s| names.contains(&s.name));
-                self.loader
-                    .resolve(&runtime, account, secrets, Source::Cache)
+                resolve_cached(&self.loader, &runtime, account)?
             } else {
                 let secrets = account.secrets.iter().filter(|s| s.is_variable());
                 let resolved =
@@ -299,8 +346,108 @@ impl ExportCommand {
             failed += count;
         }
 
-        write_variables(&mut self.writer, args.output.export_format(), &variables)?;
+        let format = args.output.export_format();
+        write_runtime_dir(&mut self.writer, format, &runtime, args.output.is_eval())?;
+        write_variables(&mut self.writer, format, &variables)?;
         finish(failed)
+    }
+}
+
+/// Generates the completion script for `shell`, offering the profile and secret names of
+/// `config` where the command line takes them.
+fn completion(shell: Shell, config: Option<&Config>) -> Result<String> {
+    let mut command = Program::command();
+    if let Some(config) = config {
+        let profiles: Vec<String> = config.accounts.iter().map(|a| a.name.clone()).collect();
+        let mut secrets: Vec<String> = config
+            .accounts
+            .iter()
+            .flat_map(|a| a.secrets.iter().map(|s| s.name.clone()))
+            .collect();
+        secrets.sort();
+        secrets.dedup();
+
+        let subcommands: Vec<String> = command
+            .get_subcommands()
+            .filter(|c| c.get_arguments().any(|a| a.get_id() == "profile"))
+            .map(|c| c.get_name().to_string())
+            .collect();
+        for name in subcommands {
+            let profiles = PossibleValuesParser::new(profiles.clone());
+            command = command
+                .mut_subcommand(name, |c| c.mut_arg("profile", |a| a.value_parser(profiles)));
+        }
+        command = command.mut_subcommand("secret", |c| {
+            c.mut_arg("name", |a| {
+                a.value_parser(PossibleValuesParser::new(secrets))
+            })
+        });
+    }
+
+    let shell = match shell {
+        Shell::Zsh => clap_complete::Shell::Zsh,
+        Shell::Bash => clap_complete::Shell::Bash,
+    };
+    let mut out = Vec::new();
+    clap_complete::generate(shell, &mut command, "secret-env", &mut out);
+    Ok(String::from_utf8(out)?)
+}
+
+/// Print the shell integration script for zsh or bash.
+pub struct InitCommand {
+    /// Writer used to output the script.
+    pub writer: Box<dyn Write>,
+    /// Loader used to read the cached secrets.
+    pub loader: Loader,
+    /// Path of the binary the shell function runs.
+    pub bin: PathBuf,
+}
+
+impl InitCommand {
+    /// Execute the InitCommand with the provided arguments.
+    pub fn execute(&mut self, args: &InitCommandArgs) -> Result<()> {
+        // This runs on every shell start, so a missing or broken config must not break it:
+        // completions fall back to the plain command line and nothing is exported.
+        let config = match args.parent.config.exists() {
+            true => match Config::read_from_file(&args.parent.config) {
+                Ok(config) => Some(config),
+                Err(err) => {
+                    warn(format!("{err:#}"));
+                    None
+                }
+            },
+            false => None,
+        };
+
+        let template = match args.shell {
+            Shell::Zsh => include_str!("init.zsh"),
+            Shell::Bash => include_str!("init.bash"),
+        };
+        let script = template
+            .replace("{{bin}}", &quote(&self.bin.to_string_lossy()))
+            .replace(
+                "{{completion}}",
+                completion(args.shell, config.as_ref())?.trim_end(),
+            );
+        write!(self.writer, "{script}")?;
+
+        let Some(config) = config.filter(|_| !args.no_export) else {
+            return Ok(());
+        };
+
+        // Export the cached secrets of the loaded profiles; failures were already reported
+        let runtime = RuntimeDir::new(None);
+        let mut variables = Vec::new();
+        for account in &config.accounts {
+            match resolve_cached(&self.loader, &runtime, account) {
+                Ok((mut resolved, _)) => variables.append(&mut resolved),
+                Err(err) => warn(format!("{err:#}")),
+            }
+        }
+
+        let format = args.shell.into();
+        write_runtime_dir(&mut self.writer, format, &runtime, true)?;
+        write_variables(&mut self.writer, format, &variables)
     }
 }
 
@@ -494,6 +641,7 @@ mod tests {
             OutputArgs {
                 format: Some(format),
                 runtime_dir: Some(self.runtime_dir()),
+                eval: None,
             }
         }
 
@@ -874,6 +1022,7 @@ mod tests {
         let writer = Writer::new();
         let mut cmd = SecretCommand {
             writer: Box::new(writer.clone()),
+            statements: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
             agent: Box::new(MockKeyAgent::new()),
         };
@@ -890,6 +1039,7 @@ mod tests {
         let writer = Writer::new();
         let mut cmd = SecretCommand {
             writer: Box::new(writer.clone()),
+            statements: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
             agent: Box::new(MockKeyAgent::new()),
         };
@@ -908,6 +1058,7 @@ mod tests {
         let writer = Writer::new();
         let mut cmd = SecretCommand {
             writer: Box::new(writer.clone()),
+            statements: Box::new(writer.clone()),
             loader: fixture.loader(client),
             agent: Box::new(MockKeyAgent::new()),
         };
@@ -932,6 +1083,7 @@ mod tests {
         let writer = Writer::new();
         let mut cmd = SecretCommand {
             writer: Box::new(writer.clone()),
+            statements: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
             agent: Box::new(agent),
         };
@@ -947,6 +1099,7 @@ mod tests {
         let fixture = Fixture::new();
         let mut cmd = SecretCommand {
             writer: Box::new(Writer::new()),
+            statements: Box::new(Writer::new()),
             loader: fixture.loader(offline()),
             agent: Box::new(MockKeyAgent::new()),
         };
@@ -1116,6 +1269,213 @@ mod tests {
             "failed to load 1 secret(s)"
         );
         assert!(!marker.exists());
+    }
+
+    /// Returns the runtime directory assigned by the statements in `output`, if any.
+    fn assigned_runtime_dir(output: &str) -> Option<PathBuf> {
+        output.lines().find_map(|line| {
+            let value = line
+                .strip_prefix("typeset -g _SECRET_ENV_RUNTIME_DIR=")
+                .or_else(|| line.strip_prefix("_SECRET_ENV_RUNTIME_DIR="))?;
+            Some(PathBuf::from(value.trim_matches('\'')))
+        })
+    }
+
+    fn eval_output(shell: Shell) -> OutputArgs {
+        OutputArgs {
+            eval: Some(shell),
+            ..Default::default()
+        }
+    }
+
+    fn init_args(fixture: &Fixture, shell: Shell, no_export: bool) -> InitCommandArgs {
+        InitCommandArgs {
+            parent: fixture.parent(),
+            shell,
+            no_export,
+        }
+    }
+
+    #[test]
+    fn init_writes_zsh_script_with_cached_exports() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "GITHUB_TOKEN", "brown-fox")
+            .cached("personal", "GCP_CREDENTIALS", "{}")
+            .loaded("personal", "env:GITHUB_TOKEN\nfile:GCP_CREDENTIALS\n");
+        let writer = Writer::new();
+        let mut cmd = InitCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            bin: PathBuf::from("/opt/it's/secret-env"),
+        };
+
+        cmd.execute(&init_args(&fixture, Shell::Zsh, false))?;
+
+        let output = writer.contents();
+        assert!(output.contains("typeset -g _SECRET_ENV_BIN='/opt/it'\\''s/secret-env'\n"));
+        assert!(output.contains("\nsecret-env() {\n"));
+        assert!(output.contains("_secret-env() {"));
+        assert!(!output.contains("{{"));
+        assert!(output.contains("\nexport GITHUB_TOKEN='brown-fox'\n"));
+
+        // The file secret lives in a directory the shell removes when it exits
+        let dir = assigned_runtime_dir(&output).expect("runtime directory is assigned");
+        let file = dir.join("files/personal/GCP_CREDENTIALS");
+        assert!(output.ends_with(&format!("export GCP_CREDENTIALS='{}'\n", file.display())));
+        assert_eq!(std::fs::read_to_string(&file)?, "{}");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_writes_bash_script() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "GITHUB_TOKEN", "brown-fox")
+            .loaded("personal", "env:GITHUB_TOKEN\n");
+        let writer = Writer::new();
+        let mut cmd = InitCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            bin: PathBuf::from("/usr/local/bin/secret-env"),
+        };
+
+        cmd.execute(&init_args(&fixture, Shell::Bash, false))?;
+
+        let output = writer.contents();
+        assert!(output.contains("_SECRET_ENV_BIN='/usr/local/bin/secret-env'\n"));
+        assert!(output.contains("SECRET_ENV_EVAL=bash"));
+        assert!(output.contains("complete -F _secret__env"));
+        assert!(output.ends_with("export GITHUB_TOKEN='brown-fox'\n"));
+        assert_eq!(assigned_runtime_dir(&output), None);
+        Ok(())
+    }
+
+    #[test]
+    fn init_without_export_writes_script_only() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "GITHUB_TOKEN", "brown-fox")
+            .loaded("personal", "env:GITHUB_TOKEN\n");
+        let writer = Writer::new();
+        let mut cmd = InitCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            bin: PathBuf::from("secret-env"),
+        };
+
+        cmd.execute(&init_args(&fixture, Shell::Zsh, true))?;
+
+        assert!(!writer
+            .contents()
+            .lines()
+            .any(|line| line.starts_with("export ")));
+        Ok(())
+    }
+
+    #[test]
+    fn init_without_config_writes_script_only() -> Result<()> {
+        let fixture = Fixture::new();
+        std::fs::remove_file(fixture.parent().config)?;
+        let writer = Writer::new();
+        let mut cmd = InitCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            bin: PathBuf::from("secret-env"),
+        };
+
+        cmd.execute(&init_args(&fixture, Shell::Zsh, false))?;
+
+        let output = writer.contents();
+        assert!(output.contains("\nsecret-env() {\n"));
+        assert!(!output.lines().any(|line| line.starts_with("export ")));
+        Ok(())
+    }
+
+    #[test]
+    fn init_with_broken_config_still_writes_script() -> Result<()> {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.parent().config, "version: 2\n")?;
+        let writer = Writer::new();
+        let mut cmd = InitCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            bin: PathBuf::from("secret-env"),
+        };
+
+        cmd.execute(&init_args(&fixture, Shell::Bash, false))?;
+
+        assert!(writer.contents().contains("\nsecret-env() {\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn completion_offers_configured_profiles_and_secrets() -> Result<()> {
+        let config = Config::parse(CONFIG)?;
+
+        let bash = completion(Shell::Bash, Some(&config))?;
+        assert!(bash.contains("personal work"));
+        assert!(bash.contains("API_KEY GCP_CREDENTIALS GITHUB_TOKEN my-key"));
+
+        let zsh = completion(Shell::Zsh, Some(&config))?;
+        assert!(zsh.contains("(personal work)"));
+        assert!(zsh.contains("(API_KEY GCP_CREDENTIALS GITHUB_TOKEN my-key)"));
+
+        // Without a config only the command line itself is completed
+        assert!(!completion(Shell::Zsh, None)?.contains("(personal work)"));
+        Ok(())
+    }
+
+    #[test]
+    fn shell_in_eval_mode_hands_runtime_dir_to_the_shell() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "GITHUB_TOKEN", "a")
+            .cached("personal", "GCP_CREDENTIALS", "{}")
+            .cached("personal", "my-key", &TEST_KEY);
+        let mut agent = agent(vec![]);
+        agent.expect_add().returning(|_, _| Ok(()));
+        let writer = Writer::new();
+        let mut cmd = ShellCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            agent: Box::new(agent),
+        };
+
+        cmd.execute(&ShellCommandArgs {
+            output: eval_output(Shell::Zsh),
+            ..shell_args(&fixture, false)
+        })?;
+
+        let output = writer.contents();
+        assert!(output.starts_with("typeset -g _SECRET_ENV_RUNTIME_DIR='"));
+        let dir = assigned_runtime_dir(&output).unwrap();
+        assert!(dir.join("files/personal/GCP_CREDENTIALS").exists());
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn secret_in_eval_mode_prints_path_and_hands_runtime_dir_to_the_shell() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "GCP_CREDENTIALS", "{}");
+        let (writer, statements) = (Writer::new(), Writer::new());
+        let mut cmd = SecretCommand {
+            writer: Box::new(writer.clone()),
+            statements: Box::new(statements.clone()),
+            loader: fixture.loader(offline()),
+            agent: Box::new(MockKeyAgent::new()),
+        };
+
+        cmd.execute(&SecretCommandArgs {
+            output: eval_output(Shell::Bash),
+            ..secret_args(&fixture, "GCP_CREDENTIALS", false)
+        })?;
+
+        let dir = assigned_runtime_dir(&statements.contents()).unwrap();
+        assert!(statements
+            .contents()
+            .starts_with("_SECRET_ENV_RUNTIME_DIR='"));
+        let file = dir.join("files/personal/GCP_CREDENTIALS");
+        assert_eq!(writer.contents(), format!("{}\n", file.display()));
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     #[test]

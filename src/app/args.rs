@@ -120,6 +120,34 @@ pub enum ProgramCommand {
         next_display_order = 7
     )]
     Clear(ClearCommandArgs),
+
+    /// Print the shell integration script for zsh or bash.
+    #[command(
+        name = "init",
+        about = "Print the shell integration script for zsh or bash.",
+        long_about = "Print a script that defines the `secret-env` shell function, which applies `shell`, `export` and `secret --export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(secret-env init zsh)\"` to ~/.zshrc, or `eval \"$(secret-env init bash)\"` to ~/.bashrc.",
+        next_display_order = 8
+    )]
+    Init(InitCommandArgs),
+}
+
+/// Shell specifies a shell supported by the shell integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Shell {
+    /// Zsh.
+    Zsh,
+
+    /// Bash.
+    Bash,
+}
+
+impl From<Shell> for ExportFormat {
+    fn from(shell: Shell) -> Self {
+        match shell {
+            Shell::Zsh => ExportFormat::Zsh,
+            Shell::Bash => ExportFormat::Bash,
+        }
+    }
 }
 
 /// ExportFormat specifies the output format for exported secrets.
@@ -175,23 +203,37 @@ pub struct OutputArgs {
     /// A new private temporary directory is created if not provided.
     #[arg(
         help = "Directory for file secrets (a new temporary one if not provided).",
+        env = "SECRET_ENV_RUNTIME_DIR",
         long
     )]
     pub runtime_dir: Option<PathBuf>,
+
+    /// Shell whose integration function runs this command and evaluates its statements.
+    /// Set by the script that `init` prints; not meant to be set by hand.
+    #[arg(long, env = "SECRET_ENV_EVAL", hide = true)]
+    pub eval: Option<Shell>,
 }
 
 impl OutputArgs {
-    /// Get the export format, using $SHELL detection if not explicitly provided.
-    pub fn export_format(&self) -> ExportFormat {
-        self.format.unwrap_or_else(|| {
-            let shell_path = env::var("SHELL").unwrap_or_default();
-            let shell_name = Path::new(&shell_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("zsh");
+    /// Returns true when the shell integration evaluates the statements, i.e. it runs this
+    /// command and no format was requested explicitly.
+    pub fn is_eval(&self) -> bool {
+        self.eval.is_some() && self.format.is_none()
+    }
 
-            <ExportFormat as FromStr>::from_str(shell_name).unwrap_or(ExportFormat::Zsh)
-        })
+    /// Get the export format: the explicit one, the integration's shell, or $SHELL detection.
+    pub fn export_format(&self) -> ExportFormat {
+        self.format
+            .or(self.eval.map(ExportFormat::from))
+            .unwrap_or_else(|| {
+                let shell_path = env::var("SHELL").unwrap_or_default();
+                let shell_name = Path::new(&shell_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("zsh");
+
+                <ExportFormat as FromStr>::from_str(shell_name).unwrap_or(ExportFormat::Zsh)
+            })
     }
 }
 
@@ -367,6 +409,22 @@ pub struct ExecCommandArgs {
     pub command: Vec<String>,
 }
 
+/// InitCommandArgs defines the arguments for the InitCommand.
+#[derive(Debug, Args)]
+pub struct InitCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+
+    /// Shell to print the integration script for.
+    #[arg(help = "Shell to integrate with.")]
+    pub shell: Shell,
+
+    /// Do not export the cached secrets of loaded profiles.
+    #[arg(help = "Do not export cached secrets of loaded profiles.", long)]
+    pub no_export: bool,
+}
+
 /// ClearCommandArgs defines the arguments for the ClearCommand.
 #[derive(Debug, Args)]
 pub struct ClearCommandArgs {
@@ -415,9 +473,33 @@ mod tests {
     fn export_format_prefers_explicit_format() {
         let args = OutputArgs {
             format: Some(ExportFormat::Json),
-            runtime_dir: None,
+            eval: Some(Shell::Bash),
+            ..Default::default()
         };
         assert_eq!(args.export_format(), ExportFormat::Json);
+        assert!(!args.is_eval());
+    }
+
+    #[test]
+    fn export_format_follows_shell_integration() {
+        let args = OutputArgs {
+            eval: Some(Shell::Bash),
+            ..Default::default()
+        };
+        assert_eq!(args.export_format(), ExportFormat::Bash);
+        assert!(args.is_eval());
+    }
+
+    #[test]
+    fn init_parses_shell() {
+        let program =
+            Program::try_parse_from(["secret-env", "init", "bash", "--no-export"]).unwrap();
+        let ProgramCommand::Init(args) = program.command else {
+            panic!("expected the init command");
+        };
+        assert_eq!(args.shell, Shell::Bash);
+        assert!(args.no_export);
+        assert!(Program::try_parse_from(["secret-env", "init", "fish"]).is_err());
     }
 
     #[test]

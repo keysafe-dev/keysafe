@@ -29,6 +29,7 @@ fn workspace(config: &str) -> tempfile::TempDir {
 fn secret_env(dir: &Path) -> assert_cmd::Command {
     let mut cmd = cargo_bin_cmd!();
     cmd.env_remove("SECRET_ENV_DEFAULT_PROFILE")
+        .env("HOME", dir)
         .env("SECRET_ENV_CONFIG_FILE", dir.join("config.yml"))
         .env("SECRET_ENV_CACHE_DIR", dir.join("cache"));
     cmd
@@ -147,4 +148,187 @@ fn shell_uses_default_profile_from_environment() {
 fn exec_requires_a_command() {
     let dir = workspace(CONFIG);
     secret_env(dir.path()).arg("exec").assert().failure();
+}
+
+/// Runs `script` in a clean `shell` (zsh or bash) whose home, config and cache are in `dir`,
+/// so nothing it starts can reach the real keychain cache.
+fn run_shell(shell: &str, dir: &Path, script: &str) -> std::process::Output {
+    let flags: &[&str] = match shell {
+        "zsh" => &["-f", "-c"],
+        _ => &["--norc", "--noprofile", "-c"],
+    };
+    std::process::Command::new(shell)
+        .args(flags)
+        .arg(script)
+        .env_remove("SECRET_ENV_DEFAULT_PROFILE")
+        .env("HOME", dir)
+        .env("SECRET_ENV_CONFIG_FILE", dir.join("config.yml"))
+        .env("SECRET_ENV_CACHE_DIR", dir.join("cache"))
+        .output()
+        .unwrap()
+}
+
+/// Returns the statement that sets up the shell integration for `shell`.
+fn init(shell: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_secret-env");
+    format!("eval \"$('{bin}' init {shell})\"")
+}
+
+/// Runs `script` in a clean `shell` after `eval "$(secret-env init <shell>)"`.
+fn with_init(shell: &str, dir: &Path, script: &str) -> std::process::Output {
+    run_shell(shell, dir, &format!("{}\n{script}", init(shell)))
+}
+
+fn stdout(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Writes a stand-in for the binary that sends `statements` to fd 3, prints `raw` to stdout and
+/// exits with `code`, the way secret-env does under the shell integration.
+fn stub(dir: &Path, statements: &str, raw: &str, code: i32) -> String {
+    let path = dir.join("stub");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$SECRET_ENV_EVAL\" > '{}'\nprintf '%s\\n' '{statements}' >&3\n[ -z '{raw}' ] || printf '%s\\n' '{raw}'\nexit {code}\n",
+        dir.join("eval").display()
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn init_scripts_are_valid_shell() {
+    let dir = workspace(CONFIG);
+    // /bin/bash is bash 3.2 on macOS, which parses some constructs differently
+    for (shell, interpreter) in [("zsh", "zsh"), ("bash", "bash"), ("bash", "/bin/bash")] {
+        if interpreter.starts_with('/') && !Path::new(interpreter).exists() {
+            continue;
+        }
+        let script = secret_env(dir.path())
+            .args(["init", shell])
+            .output()
+            .unwrap();
+        assert!(script.status.success());
+        let flag = if shell == "zsh" { "-fn" } else { "-n" };
+        let status = std::process::Command::new(interpreter)
+            .args([flag, "-c"])
+            .arg(String::from_utf8(script.stdout).unwrap())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{interpreter} rejects the init script");
+    }
+}
+
+#[test]
+fn init_function_passes_other_commands_through() {
+    let dir = workspace(CONFIG);
+    for shell in ["zsh", "bash"] {
+        let output = with_init(shell, dir.path(), "secret-env list");
+        assert_eq!(stdout(&output), "personal\nwork\n", "{shell}");
+    }
+}
+
+#[test]
+fn init_function_prints_explicit_formats_instead_of_evaluating_them() {
+    let dir = workspace(CONFIG);
+    for shell in ["zsh", "bash"] {
+        let output = with_init(
+            shell,
+            dir.path(),
+            "secret-env export --all --cached --format json",
+        );
+        assert_eq!(stdout(&output), "{}\n", "{shell}");
+    }
+}
+
+#[test]
+fn init_function_returns_the_exit_status() {
+    let dir = workspace(CONFIG);
+    for shell in ["zsh", "bash"] {
+        let output = with_init(
+            shell,
+            dir.path(),
+            "secret-env shell staging; echo \"rc=$?\"",
+        );
+        assert_eq!(stdout(&output), "rc=1\n", "{shell}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("profile 'staging' not found"));
+    }
+}
+
+#[test]
+fn init_function_evaluates_fd3_and_prints_stdout() {
+    let dir = workspace(CONFIG);
+    let stub = stub(dir.path(), "export ROUTED=yes", "raw output", 3);
+    for shell in ["zsh", "bash"] {
+        let script = format!(
+            "_SECRET_ENV_BIN='{stub}'\nsecret-env secret -x A; echo \"rc=$? ROUTED=$ROUTED\""
+        );
+        let output = with_init(shell, dir.path(), &script);
+        assert_eq!(stdout(&output), "raw output\nrc=3 ROUTED=yes\n", "{shell}");
+        let eval = std::fs::read_to_string(dir.path().join("eval")).unwrap();
+        assert_eq!(eval, format!("{shell}\n"));
+    }
+}
+
+#[test]
+fn init_removes_the_runtime_directory_on_exit() {
+    let dir = workspace(CONFIG);
+    for shell in ["zsh", "bash"] {
+        let runtime = dir.path().join(format!("runtime-{shell}"));
+        std::fs::create_dir(&runtime).unwrap();
+        let assign = match shell {
+            "zsh" => format!("typeset -g _SECRET_ENV_RUNTIME_DIR={}", runtime.display()),
+            _ => format!("_SECRET_ENV_RUNTIME_DIR={}", runtime.display()),
+        };
+        let stub = stub(dir.path(), &assign, "", 0);
+        let script = format!("_SECRET_ENV_BIN='{stub}'\nsecret-env export\n[ -d \"$_SECRET_ENV_RUNTIME_DIR\" ] && echo tracked");
+        let output = with_init(shell, dir.path(), &script);
+        assert_eq!(stdout(&output), "tracked\n", "{shell}");
+        assert!(
+            !runtime.exists(),
+            "{shell} leaves the runtime directory behind"
+        );
+    }
+}
+
+#[test]
+fn init_registers_zsh_completions_before_and_after_compinit() {
+    let dir = workspace(CONFIG);
+    let check = "print -r -- \"${_comps[secret-env]:-none}\"";
+    let compinit = format!(
+        "autoload -Uz compinit; compinit -u -d '{}'",
+        dir.path().join("zcd").display()
+    );
+
+    // compinit already ran: registered right away
+    let script = format!("{compinit}\n{}\n{check}", init("zsh"));
+    let output = run_shell("zsh", dir.path(), &script);
+    assert_eq!(stdout(&output), "_secret-env\n");
+
+    // compinit runs later in ~/.zshrc: registered before the first prompt
+    let script = format!("{check}\n{compinit}\nfor f in $precmd_functions; do $f; done\n{check}");
+    let output = with_init("zsh", dir.path(), &script);
+    assert_eq!(stdout(&output), "none\n_secret-env\n");
+}
+
+#[test]
+fn init_registers_bash_completions() {
+    let dir = workspace(CONFIG);
+    let output = with_init("bash", dir.path(), "complete -p secret-env");
+    assert!(stdout(&output).contains("-F _secret__env"));
+}
+
+#[test]
+fn init_keeps_an_existing_bash_exit_trap() {
+    let dir = workspace(CONFIG);
+    // Evaluating the integration twice must not add the cleanup twice
+    let script = format!(
+        "trap 'echo previous trap' EXIT\n{init}\n{init}\ntrap -p EXIT",
+        init = init("bash")
+    );
+    let output = run_shell("bash", dir.path(), &script);
+    assert_eq!(
+        stdout(&output),
+        "trap -- '_secret_env_cleanup; echo previous trap' EXIT\nprevious trap\n"
+    );
 }

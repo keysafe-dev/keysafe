@@ -5,8 +5,6 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::log::warn;
-
 /// RuntimeDir is the private directory file secrets are written to.
 pub struct RuntimeDir {
     /// Directory given by the caller.
@@ -16,12 +14,19 @@ pub struct RuntimeDir {
 }
 
 impl RuntimeDir {
-    /// Creates a runtime directory rooted at `root`, or at a new temporary directory.
+    /// Creates a runtime directory rooted at `root`, or at a new temporary directory. An empty
+    /// `root` counts as none.
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
-            root,
+            root: root.filter(|p| !p.as_os_str().is_empty()),
             created: OnceCell::new(),
         }
+    }
+
+    /// Returns the temporary directory created because no root was given, if any. Whoever
+    /// created the runtime directory is responsible for removing it.
+    pub fn created(&self) -> Option<&Path> {
+        self.created.get().map(PathBuf::as_path)
     }
 
     /// Returns the root directory, creating a temporary one if needed.
@@ -38,10 +43,6 @@ impl RuntimeDir {
             .tempdir()
             .context("failed to create file secret runtime directory")?
             .keep();
-        warn(format!(
-            "file secrets are written to {}; remove it when done",
-            dir.display()
-        ));
         Ok(self.created.get_or_init(|| dir))
     }
 
@@ -93,6 +94,19 @@ mod tests {
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         assert_eq!(mode(&root), 0o700);
+    }
+
+    #[test]
+    fn write_creates_temporary_root_when_none_is_given() {
+        let runtime = RuntimeDir::new(Some(PathBuf::new()));
+        assert_eq!(runtime.created(), None);
+
+        let path = runtime.write("personal", "A", "v").unwrap();
+
+        let created = runtime.created().unwrap().to_path_buf();
+        assert!(path.starts_with(&created));
+        assert_eq!(mode(&created), 0o700);
+        std::fs::remove_dir_all(created).unwrap();
     }
 
     #[test]
