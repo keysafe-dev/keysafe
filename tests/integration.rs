@@ -314,8 +314,14 @@ fn init_registers_zsh_completions_before_and_after_compinit() {
 #[test]
 fn init_registers_bash_completions() {
     let dir = workspace(CONFIG);
-    let output = with_init("bash", dir.path(), "complete -p secret-env");
-    assert!(stdout(&output).contains("-F _secret__env"));
+    let script =
+        "if type complete >/dev/null 2>&1; then complete -p secret-env; else echo none; fi";
+    let output = with_init("bash", dir.path(), script);
+    // A bash without readline has no `complete`: the integration must load without errors
+    match stdout(&output).as_str() {
+        "none\n" => assert_eq!(String::from_utf8_lossy(&output.stderr), ""),
+        registered => assert!(registered.contains("-F _secret__env"), "{registered}"),
+    }
 }
 
 #[test]

@@ -48,6 +48,7 @@
           packages = [
             rust-toolchain
             pkgs.pkg-config
+            pkgs.bashInteractive
             pkgs.zsh
             pkgs._1password-cli
           ];

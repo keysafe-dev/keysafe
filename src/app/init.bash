@@ -59,5 +59,8 @@ _secret_env_trap() {
 _secret_env_trap
 
 # Completions, generated from the command line definition and the profiles
-# and secrets in the config.
+# and secrets in the config. Builds of bash without readline, like the
+# non-interactive ones some distributions ship, have no `complete`.
+if type complete >/dev/null 2>&1; then
 {{completion}}
+fi
