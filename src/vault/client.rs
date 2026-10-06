@@ -15,6 +15,9 @@ use mockall::automock;
 pub trait SecretClient {
     /// Reads the secret referenced by `path` from `provider`.
     fn read(&self, provider: &Provider, path: &str) -> Result<String>;
+    /// Checks that `provider` can be used, without prompting the user, and describes it.
+    /// Fails with a hint on how to fix the problem.
+    fn check(&self, provider: &Provider) -> Result<String>;
 }
 
 /// Client reads secrets through the CLI of each provider: `op` for 1Password.
@@ -92,10 +95,57 @@ impl Client {
     }
 }
 
+impl Client {
+    /// Checks that the 1Password CLI is installed and knows `account`. Being signed in is
+    /// not checked, since that can prompt for authorization.
+    fn check_1password(&self, account: Option<&str>) -> Result<String> {
+        let output = match Command::new("op")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => bail!(
+                "the 1Password CLI (op) is not installed (https://developer.1password.com/docs/cli/get-started/)"
+            ),
+        };
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let Some(account) = account else {
+            return Ok(format!("op {version}, using its default account"));
+        };
+
+        // `op account list` reads the local settings only, so it never prompts
+        let output = Command::new("op")
+            .args(["account", "list", "--format", "json"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .context("failed to run the 1Password CLI (op)")?;
+        let accounts: Vec<HashMap<String, serde_json::Value>> =
+            serde_json::from_slice(&output.stdout).unwrap_or_default();
+        let known = accounts.iter().any(|a| {
+            ["url", "email", "account_uuid", "user_uuid"]
+                .iter()
+                .filter_map(|key| a.get(*key).and_then(|v| v.as_str()))
+                .any(|value| value.eq_ignore_ascii_case(account))
+        });
+        if !known {
+            bail!("op does not know account {account} (run: op account add)");
+        }
+        Ok(format!("op {version}, account {account}"))
+    }
+}
+
 impl SecretClient for Client {
     fn read(&self, provider: &Provider, path: &str) -> Result<String> {
         match provider {
             Provider::OnePassword { account } => self.read_1password(account.as_deref(), path),
+        }
+    }
+
+    fn check(&self, provider: &Provider) -> Result<String> {
+        match provider {
+            Provider::OnePassword { account } => self.check_1password(account.as_deref()),
         }
     }
 }

@@ -126,6 +126,7 @@ Commands:
   export   Export the environment and file secrets of a profile as shell statements.
   exec     Execute a command with the secrets of a profile in its environment.
   status   Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.
+  doctor   Check the setup and say how to fix problems.
   profile  List, show and clear profiles.
   config   Create, edit and locate the config file.
   init     Print the shell integration script for zsh or bash.
@@ -204,6 +205,16 @@ keysafe picks up where the zsh-op plugin left off:
 - Secrets cached under `op-secrets-<profile>` move to `keysafe.<profile>` the first time they are read; the old items are deleted.
 
 ## Troubleshooting
+
+Start with `keysafe doctor`. It checks the config, the 1Password CLI and your accounts, the keychain, ssh-agent and the shell integration, without prompting for anything, and says how to fix each problem:
+
+```
+✓ Config: /Users/me/.config/keysafe/config.yml (the default location), 2 profile(s)
+✗ 1password (work): op does not know account team.1password.com (run: op account add)
+✓ Keychain: reachable
+✓ SSH agent: running, 1 key(s)
+! Shell integration: not active in this shell (add `eval "$(keysafe init zsh)"` to ~/.zshrc, or `init bash` to ~/.bashrc)
+```
 
 **"not signed in to 1Password account"**: run `op signin --account my.1password.com`.
 

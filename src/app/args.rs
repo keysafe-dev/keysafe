@@ -157,11 +157,20 @@ pub enum ProgramCommand {
     )]
     Status(StatusCommandArgs),
 
+    /// Check the setup and say how to fix problems.
+    #[command(
+        name = "doctor",
+        about = "Check the setup and say how to fix problems.",
+        long_about = "Check the config, each provider's CLI (without prompting: being signed in is checked when secrets are read), the keychain, ssh-agent and the shell integration. Prints how to fix each problem, and exits with an error if anything is broken.",
+        next_display_order = 7
+    )]
+    Doctor(DoctorCommandArgs),
+
     /// List, show and clear profiles.
     #[command(
         name = "profile",
         about = "List, show and clear profiles.",
-        next_display_order = 7
+        next_display_order = 8
     )]
     Profile(ProfileCommandArgs),
 
@@ -169,7 +178,7 @@ pub enum ProgramCommand {
     #[command(
         name = "config",
         about = "Create, edit and locate the config file.",
-        next_display_order = 8
+        next_display_order = 9
     )]
     Config(ConfigCommandArgs),
 
@@ -178,7 +187,7 @@ pub enum ProgramCommand {
         name = "init",
         about = "Print the shell integration script for zsh or bash.",
         long_about = "Print a script that defines the `keysafe` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `eval \"$(keysafe init bash)\"` to ~/.bashrc.",
-        next_display_order = 9
+        next_display_order = 10
     )]
     Init(InitCommandArgs),
 }
@@ -193,6 +202,7 @@ impl ProgramCommand {
             Self::Export(args) => &mut args.parent,
             Self::Exec(args) => &mut args.parent,
             Self::Status(args) => &mut args.parent,
+            Self::Doctor(args) => &mut args.parent,
             Self::Profile(args) => match &mut args.command {
                 ProfileCommand::List(args) => &mut args.parent,
                 ProfileCommand::Show(args) => &mut args.parent,
@@ -523,6 +533,19 @@ pub struct ConfigPathCommandArgs {
     /// Shared global flags.
     #[command(flatten)]
     pub parent: ProgramArgs,
+}
+
+/// DoctorCommandArgs defines the arguments for the DoctorCommand.
+#[derive(Debug, Args)]
+pub struct DoctorCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+
+    /// Shell whose integration runs this command.
+    /// Set by the script that `init` prints; not meant to be set by hand.
+    #[arg(long, env = "KEYSAFE_SHELL", hide = true)]
+    pub shell: Option<Shell>,
 }
 
 /// ProfileCommandArgs defines the arguments for the profile subcommands.
