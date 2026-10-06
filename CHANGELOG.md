@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/keysafe-dev/keysafe/compare/v0.3.1...v0.4.0) (2026-10-06)
+
+
+### Features
+
+* spinners, summaries and colors; keep secrets off the terminal ([#30](https://github.com/keysafe-dev/keysafe/issues/30)) ([7bd99e0](https://github.com/keysafe-dev/keysafe/commit/7bd99e0d39fbd5673c9cbd7a40e704dc09b015e6))
+
+
+### Bug Fixes
+
+* delete every cached item of a profile, including zsh-op leftovers ([#31](https://github.com/keysafe-dev/keysafe/issues/31)) ([e02b0a3](https://github.com/keysafe-dev/keysafe/commit/e02b0a31362062f5036354efcfcbd6ebf4c2488b))
+* don't print secrets on the terminal when `load` can't change the shell ([#28](https://github.com/keysafe-dev/keysafe/issues/28)) ([dc8bfd2](https://github.com/keysafe-dev/keysafe/commit/dc8bfd268a956274a448ff94104db6a80647cf34))
+
 ## [0.3.1](https://github.com/keysafe-dev/keysafe/compare/v0.3.0...v0.3.1) (2026-10-06)
 
 
