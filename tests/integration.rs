@@ -246,6 +246,30 @@ fn doctor_reports_a_missing_config() {
 }
 
 #[test]
+fn quiet_and_verbose_change_what_goes_to_stderr() {
+    let dir = workspace(CONFIG);
+    let stderr = |flag: Option<&str>| {
+        let mut cmd = keysafe(dir.path());
+        cmd.args(["config", "path"]);
+        if let Some(flag) = flag {
+            cmd.arg(flag);
+        }
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stderr).unwrap()
+    };
+
+    assert_eq!(stderr(Some("-q")), "");
+    assert_eq!(stderr(None), "keysafe: set by KEYSAFE_CONFIG_FILE\n");
+    let verbose = stderr(Some("-v"));
+    assert!(verbose.contains("keysafe: debug: config: "), "{verbose}");
+    assert!(
+        verbose.contains("keysafe: set by KEYSAFE_CONFIG_FILE"),
+        "{verbose}"
+    );
+}
+
+#[test]
 fn config_init_ignores_the_legacy_config() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = dir.path().join(".config/op/config.yml");

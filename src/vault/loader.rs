@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::log::warn;
+use crate::log::{debug, warn};
 use crate::vault::{
     fingerprint, public_key, Cache, KeyAgent, Profile, RuntimeDir, Secret, SecretClient, SecretKind,
 };
@@ -56,12 +56,19 @@ impl Loader {
     pub fn load(&self, account: &Profile, secret: &Secret, refresh: bool) -> Result<String> {
         if !refresh {
             match self.cache.get(&account.name, &secret.name) {
-                Ok(Some(value)) => return Ok(value),
+                Ok(Some(value)) => {
+                    debug(format!("'{}' from the keychain", secret.name));
+                    return Ok(value);
+                }
                 Ok(None) => {}
                 Err(err) => warn(format!("{err:#}; fetching it from 1Password")),
             }
         }
 
+        debug(format!(
+            "'{}' from {} ({})",
+            secret.name, account.provider, secret.path
+        ));
         let value = self.client.read(&account.provider, &secret.path)?;
         // A failed cache write only costs a 1Password round trip next time.
         if let Err(err) = self.cache.set(&account.name, &secret.name, &value) {

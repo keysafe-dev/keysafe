@@ -4,12 +4,66 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+/// Examples shown at the end of each command's help.
+const PROGRAM_HELP: &str = "Get started:
+  keysafe config init         # create a starter config
+  keysafe config edit         # add your secrets
+  eval \"$(keysafe init zsh)\"  # in ~/.zshrc (or `init bash` in ~/.bashrc)
+  keysafe load                # load the default profile
+
+If something doesn't work, run `keysafe doctor`.";
+const LOAD_EXAMPLES: &str = "Examples:
+  keysafe load                # every secret of the default profile
+  keysafe load -p work -e 8h  # the work profile, SSH keys for 8 hours
+  keysafe load GITHUB_TOKEN   # one secret
+  keysafe load -r -p work     # fetch again from 1Password";
+const UNLOAD_EXAMPLES: &str = "Examples:
+  keysafe unload               # the whole default profile
+  keysafe unload -p work       # the work profile
+  keysafe unload GITHUB_TOKEN  # one secret";
+const READ_EXAMPLES: &str = "Examples:
+  keysafe read GITHUB_TOKEN              # print a value
+  keysafe read -p work API_KEY | pbcopy  # copy it to the clipboard";
+const EXPORT_EXAMPLES: &str = "Examples:
+  eval \"$(keysafe export -p work)\"      # without the shell integration
+  keysafe export -p work --format json  # as a JSON object
+  keysafe export --all --cached         # what new shells get";
+const EXEC_EXAMPLES: &str = "Examples:
+  keysafe exec -- terraform plan          # with the default profile
+  keysafe exec -p work -- npm run deploy  # with the work profile";
+const STATUS_EXAMPLES: &str = "Examples:
+  keysafe status          # every profile
+  keysafe status -p work  # one profile";
+const DOCTOR_EXAMPLES: &str = "Examples:
+  keysafe doctor  # check everything";
+const LIST_EXAMPLES: &str = "Examples:
+  keysafe profile list  # one name per line";
+const SHOW_EXAMPLES: &str = "Examples:
+  keysafe profile show       # every profile
+  keysafe profile show work  # one profile";
+const CLEAR_EXAMPLES: &str = "Examples:
+  keysafe profile clear work  # delete its cached secrets";
+const INIT_CONFIG_EXAMPLES: &str = "Examples:
+  keysafe config init          # create ~/.config/keysafe/config.yml
+  keysafe config init --force  # start over";
+const EDIT_EXAMPLES: &str = "Examples:
+  keysafe config edit                       # in $VISUAL or $EDITOR
+  EDITOR=\"code --wait\" keysafe config edit  # in VS Code";
+const PATH_EXAMPLES: &str = "Examples:
+  keysafe config path           # print the path
+  cat \"$(keysafe config path)\"  # use it in a script";
+const INIT_SHELL_EXAMPLES: &str = "Examples:
+  eval \"$(keysafe init zsh)\"              # add to ~/.zshrc
+  eval \"$(keysafe init bash)\"             # add to ~/.bashrc
+  eval \"$(keysafe init zsh --no-export)\"  # without exporting cached secrets";
+
 /// Program is the main entry point for the keysafe CLI.
 #[derive(Debug, Parser)]
 #[command(
     name = "keysafe",
     about = "1Password secrets for your shell.",
     long_about = "Fetch secrets from 1Password, cache them in the system keychain, export them into your shell, and add SSH keys to ssh-agent.",
+    after_help = PROGRAM_HELP,
     version
 )]
 pub struct Program {
@@ -39,6 +93,23 @@ pub struct ProgramArgs {
         long
     )]
     pub state_dir: PathBuf,
+
+    /// Print warnings and errors only.
+    #[arg(
+        help = "Print warnings and errors only.",
+        long,
+        short,
+        conflicts_with = "verbose"
+    )]
+    pub quiet: bool,
+
+    /// Print details for debugging.
+    #[arg(
+        help = "Print details for debugging (never secret values).",
+        long,
+        short
+    )]
+    pub verbose: bool,
 }
 
 impl Default for ProgramArgs {
@@ -46,6 +117,8 @@ impl Default for ProgramArgs {
         Self {
             config: default_config(),
             state_dir: default_state_dir(),
+            quiet: false,
+            verbose: false,
         }
     }
 }
@@ -106,6 +179,7 @@ pub enum ProgramCommand {
     /// Load secrets of a profile into the current shell.
     #[command(
         name = "load",
+        after_help = LOAD_EXAMPLES,
         about = "Load secrets of a profile into the current shell.",
         long_about = "Export environment secrets, write file secrets and export their paths, and add SSH keys to ssh-agent. Without names, every secret of the profile is loaded and the profile is recorded, so its cached secrets are exported in new shells. Needs the shell integration (`keysafe init`); otherwise, evaluate the printed statements yourself.",
         next_display_order = 1
@@ -115,6 +189,7 @@ pub enum ProgramCommand {
     /// Unload secrets of a profile from the current shell.
     #[command(
         name = "unload",
+        after_help = UNLOAD_EXAMPLES,
         about = "Unload secrets of a profile from the current shell.",
         long_about = "Undo `load`: unset the environment variables, delete the files of file secrets, and remove the SSH keys keysafe added from ssh-agent. Without names, the whole profile is unloaded and no longer exported in new shells. Its cached secrets stay; use `profile clear` to delete them. Needs the shell integration (`keysafe init`); otherwise, evaluate the printed statements yourself.",
         next_display_order = 2
@@ -124,6 +199,7 @@ pub enum ProgramCommand {
     /// Print the value of a secret.
     #[command(
         name = "read",
+        after_help = READ_EXAMPLES,
         about = "Print the value of a secret.",
         long_about = "Print the value of an environment or file secret, from the keychain cache or 1Password. SSH keys are not printed; use `load` to add them to ssh-agent.",
         next_display_order = 3
@@ -133,6 +209,7 @@ pub enum ProgramCommand {
     /// Export the environment and file secrets of a profile as shell statements.
     #[command(
         name = "export",
+        after_help = EXPORT_EXAMPLES,
         about = "Export the environment and file secrets of a profile as shell statements.",
         long_about = "Emit shell-ready export statements (or JSON) for the environment and file secrets of a profile. With --cached, only secrets of previously loaded profiles are read from the keychain and 1Password is never contacted.",
         next_display_order = 4
@@ -142,6 +219,7 @@ pub enum ProgramCommand {
     /// Execute a command with the secrets of a profile in its environment.
     #[command(
         name = "exec",
+        after_help = EXEC_EXAMPLES,
         about = "Execute a command with the secrets of a profile in its environment.",
         long_about = "Resolve the environment and file secrets of a profile, then run the given command with them in its environment. File secrets are removed once the command exits.",
         next_display_order = 5
@@ -151,6 +229,7 @@ pub enum ProgramCommand {
     /// Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.
     #[command(
         name = "status",
+        after_help = STATUS_EXAMPLES,
         about = "Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.",
         long_about = "Show, for each profile, which of its variables are set in this shell, which of its SSH keys are in ssh-agent and when they expire, and whether its cached secrets are exported in new shells. Secret values are never printed.",
         next_display_order = 6
@@ -160,6 +239,7 @@ pub enum ProgramCommand {
     /// Check the setup and say how to fix problems.
     #[command(
         name = "doctor",
+        after_help = DOCTOR_EXAMPLES,
         about = "Check the setup and say how to fix problems.",
         long_about = "Check the config, each provider's CLI (without prompting: being signed in is checked when secrets are read), the keychain, ssh-agent and the shell integration. Prints how to fix each problem, and exits with an error if anything is broken.",
         next_display_order = 7
@@ -185,6 +265,7 @@ pub enum ProgramCommand {
     /// Print the shell integration script for zsh or bash.
     #[command(
         name = "init",
+        after_help = INIT_SHELL_EXAMPLES,
         about = "Print the shell integration script for zsh or bash.",
         long_about = "Print a script that defines the `keysafe` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `eval \"$(keysafe init bash)\"` to ~/.bashrc.",
         next_display_order = 10
@@ -224,6 +305,7 @@ pub enum ConfigCommand {
     /// Create a starter config file.
     #[command(
         name = "init",
+        after_help = INIT_CONFIG_EXAMPLES,
         about = "Create a starter config file.",
         long_about = "Write a commented starter config, with one profile and examples of each kind of secret, to the config path (see `keysafe config path`). An existing file is never replaced unless --force is given.",
         next_display_order = 1
@@ -233,6 +315,7 @@ pub enum ConfigCommand {
     /// Open the config file in your editor, then check it.
     #[command(
         name = "edit",
+        after_help = EDIT_EXAMPLES,
         about = "Open the config file in your editor, then check it.",
         long_about = "Open the config file in $VISUAL or $EDITOR (vi if neither is set), and check that it is valid once the editor exits.",
         next_display_order = 2
@@ -242,6 +325,7 @@ pub enum ConfigCommand {
     /// Print the path of the config file in use.
     #[command(
         name = "path",
+        after_help = PATH_EXAMPLES,
         about = "Print the path of the config file in use.",
         long_about = "Print the path of the config file keysafe uses, and say on stderr where it comes from: --config, KEYSAFE_CONFIG_FILE, the default location, or zsh-op's location.",
         next_display_order = 3
@@ -255,6 +339,7 @@ pub enum ProfileCommand {
     /// List the profile names, one per line.
     #[command(
         name = "list",
+        after_help = LIST_EXAMPLES,
         about = "List the profile names, one per line.",
         next_display_order = 1
     )]
@@ -263,6 +348,7 @@ pub enum ProfileCommand {
     /// Show profiles, their secrets and whether they were loaded.
     #[command(
         name = "show",
+        after_help = SHOW_EXAMPLES,
         about = "Show profiles, their secrets and whether they were loaded.",
         long_about = "Print a profile, or every profile, with its 1Password account, its secrets and whether it has been loaded into the keychain cache. Secret values are never printed.",
         next_display_order = 2
@@ -272,6 +358,7 @@ pub enum ProfileCommand {
     /// Clear the cached secrets of a profile.
     #[command(
         name = "clear",
+        after_help = CLEAR_EXAMPLES,
         about = "Clear the cached secrets of a profile.",
         long_about = "Delete every cached secret of a profile from the keychain and forget that the profile was loaded.",
         next_display_order = 3
@@ -678,6 +765,65 @@ mod tests {
     #[test]
     fn program_definition_is_valid() {
         Program::command().debug_assert();
+    }
+
+    /// Returns every subcommand of `command`, nested ones included.
+    fn subcommands(command: &clap::Command) -> Vec<clap::Command> {
+        command
+            .get_subcommands()
+            .flat_map(|c| std::iter::once(c.clone()).chain(subcommands(c)))
+            .collect()
+    }
+
+    #[test]
+    fn every_command_has_examples() {
+        for command in subcommands(&Program::command()) {
+            if command.get_subcommands().next().is_none() {
+                assert!(
+                    command.get_after_help().is_some(),
+                    "`{}` has no examples",
+                    command.get_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn examples_are_valid_commands() {
+        let program = Program::command();
+        let helps = std::iter::once(program.clone())
+            .chain(subcommands(&program))
+            .filter_map(|c| c.get_after_help().map(|h| h.to_string()));
+        let mut checked = 0;
+        for help in helps {
+            for line in help.lines() {
+                // The command is what follows `keysafe`, up to a comment, `)"`, a pipe or the
+                // closing backtick of a command quoted in prose
+                let Some(start) = line.find("keysafe ") else {
+                    continue;
+                };
+                let command = line[start..]
+                    .split("  #")
+                    .next()
+                    .and_then(|c| c.split('`').next())
+                    .and_then(|c| c.split(")\"").next())
+                    .and_then(|c| c.split(" |").next())
+                    .unwrap();
+                let words: Vec<&str> = command.split_whitespace().collect();
+                if let Err(err) = Program::try_parse_from(&words) {
+                    panic!("example `{command}` does not parse: {err}");
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} examples found");
+    }
+
+    #[test]
+    fn quiet_and_verbose_conflict() {
+        assert!(Program::try_parse_from(["keysafe", "status", "-q", "-v"]).is_err());
+        let mut program = Program::try_parse_from(["keysafe", "load", "-q"]).unwrap();
+        assert!(program.command.parent_mut().quiet);
     }
 
     #[test]
