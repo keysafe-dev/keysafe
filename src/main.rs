@@ -118,6 +118,21 @@ fn run(program: Program) -> Result<ExitCode> {
             };
             command.execute(&args)?
         }
+        ProgramCommand::Doctor(args) => {
+            let writer = Box::new(std::io::stdout());
+            let client = Box::new(Client::new());
+            let cache = cache(&args.parent);
+            let agent = Box::new(Agent::new());
+            let env = std::env::var_os("KEYSAFE_CONFIG_FILE").map(PathBuf::from);
+            let mut command = DoctorCommand {
+                writer,
+                client,
+                cache,
+                agent,
+                env,
+            };
+            command.execute(&args)?
+        }
         ProgramCommand::Profile(args) => match args.command {
             ProfileCommand::List(args) => {
                 let writer = Box::new(std::io::stdout());

@@ -232,6 +232,20 @@ fn config_init_creates_a_usable_config_at_the_default_location() {
 }
 
 #[test]
+fn doctor_reports_a_missing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    keysafe(dir.path())
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(
+            predicate::str::starts_with("✗ Config: config file not found: ")
+                .and(predicate::str::contains("! Shell integration: not active")),
+        )
+        .stderr(predicate::str::contains("keysafe: error: found "));
+}
+
+#[test]
 fn config_init_ignores_the_legacy_config() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = dir.path().join(".config/op/config.yml");

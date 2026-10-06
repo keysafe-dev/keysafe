@@ -4,6 +4,7 @@ use crate::vault::*;
 use anyhow::{bail, Context, Result};
 use clap::{builder::PossibleValuesParser, CommandFactory};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fmt::Display;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -833,6 +834,145 @@ impl ConfigPathCommand {
             info(format!(
                 "{source}; it does not exist yet (create it with `keysafe config init`)"
             ));
+        }
+        Ok(())
+    }
+}
+
+/// Result of one `doctor` check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// Works.
+    Ok,
+    /// Works, but worth fixing.
+    Warning,
+    /// Broken.
+    Failure,
+}
+
+impl Check {
+    /// Returns the mark printed in front of the check.
+    fn mark(self) -> &'static str {
+        match self {
+            Self::Ok => "✓",
+            Self::Warning => "!",
+            Self::Failure => "✗",
+        }
+    }
+}
+
+/// Check the setup and say how to fix problems.
+pub struct DoctorCommand {
+    /// Writer used to output the checks.
+    pub writer: Box<dyn Write>,
+    /// Client used to check the providers.
+    pub client: Box<dyn SecretClient>,
+    /// Cache whose store is checked.
+    pub cache: Cache,
+    /// Agent the SSH keys are added to.
+    pub agent: Box<dyn KeyAgent>,
+    /// Value of `KEYSAFE_CONFIG_FILE`, if set.
+    pub env: Option<PathBuf>,
+}
+
+impl DoctorCommand {
+    /// Writes one check.
+    fn report(&mut self, check: Check, label: &str, detail: impl Display) -> Result<()> {
+        writeln!(self.writer, "{} {label}: {detail}", check.mark())?;
+        Ok(())
+    }
+
+    /// Execute the DoctorCommand with the provided arguments.
+    pub fn execute(&mut self, args: &DoctorCommandArgs) -> Result<()> {
+        let mut failures = 0;
+
+        // The config file
+        let path = &args.parent.config;
+        let config = match Config::read_from_file(path) {
+            Ok(config) => {
+                let check = if *path == legacy_config() {
+                    Check::Warning
+                } else {
+                    Check::Ok
+                };
+                let source = config_source(path, self.env.as_deref());
+                let detail = format!(
+                    "{} ({source}), {} profile(s)",
+                    path.display(),
+                    config.profiles.len()
+                );
+                self.report(check, "Config", detail)?;
+                Some(config)
+            }
+            Err(err) => {
+                failures += 1;
+                self.report(Check::Failure, "Config", format!("{err:#}"))?;
+                None
+            }
+        };
+
+        // Each provider setting once, with the profiles that use it
+        let profiles = config
+            .as_ref()
+            .map(|c| c.profiles.as_slice())
+            .unwrap_or_default();
+        let mut providers: Vec<(&Provider, Vec<&str>)> = Vec::new();
+        for profile in profiles {
+            match providers.iter_mut().find(|(p, _)| **p == profile.provider) {
+                Some((_, names)) => names.push(&profile.name),
+                None => providers.push((&profile.provider, vec![&profile.name])),
+            }
+        }
+        for (provider, names) in providers {
+            let label = format!("{provider} ({})", names.join(", "));
+            match self.client.check(provider) {
+                Ok(detail) => self.report(Check::Ok, &label, detail)?,
+                Err(err) => {
+                    failures += 1;
+                    self.report(Check::Failure, &label, format!("{err:#}"))?;
+                }
+            }
+        }
+
+        // The keychain: looking up a missing item needs the store, but never prompts
+        match self.cache.store.get("keysafe.doctor", "check") {
+            Ok(_) => self.report(Check::Ok, "Keychain", "reachable")?,
+            Err(err) => {
+                failures += 1;
+                self.report(Check::Failure, "Keychain", format!("{err:#}"))?;
+            }
+        }
+
+        // The SSH agent, if a profile has SSH keys
+        let has_keys = profiles
+            .iter()
+            .any(|p| p.secrets.iter().any(|s| s.kind == SecretKind::Ssh));
+        if has_keys {
+            match self.agent.fingerprints() {
+                Ok(keys) => self.report(
+                    Check::Ok,
+                    "SSH agent",
+                    format!("running, {} key(s)", keys.len()),
+                )?,
+                Err(err) => {
+                    failures += 1;
+                    self.report(Check::Failure, "SSH agent", format!("{err:#}"))?;
+                }
+            }
+        }
+
+        // The shell integration: everything but `load`, `unload` and `export` works without it
+        match args.shell {
+            Some(shell) => self.report(Check::Ok, "Shell integration", format!("active ({shell})"))?,
+            None => self.report(
+                Check::Warning,
+                "Shell integration",
+                "not active in this shell (add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `init bash` to ~/.bashrc)",
+            )?,
+        }
+
+        if failures > 0 {
+            bail!("found {failures} problem(s)");
         }
         Ok(())
     }
@@ -2247,6 +2387,131 @@ mod tests {
             "the default location"
         );
         assert!(config_source(&legacy_config(), None).starts_with("zsh-op's location"));
+    }
+
+    fn doctor(
+        fixture: &Fixture,
+        client: MockSecretClient,
+        agent: MockKeyAgent,
+    ) -> (DoctorCommand, Writer) {
+        let writer = Writer::new();
+        let cmd = DoctorCommand {
+            writer: Box::new(writer.clone()),
+            client: Box::new(client),
+            cache: fixture.cache(),
+            agent: Box::new(agent),
+            env: None,
+        };
+        (cmd, writer)
+    }
+
+    #[test]
+    fn doctor_reports_a_working_setup() -> Result<()> {
+        let fixture = Fixture::new();
+        let mut client = MockSecretClient::new();
+        client
+            .expect_check()
+            .times(2)
+            .returning(|provider| Ok(format!("checked {provider:?}")));
+        let (mut cmd, writer) = doctor(&fixture, client, agent(vec!["SHA256:a".into()]));
+
+        cmd.execute(&DoctorCommandArgs {
+            parent: fixture.parent(),
+            shell: Some(Shell::Zsh),
+        })?;
+
+        let config = fixture.parent().config;
+        let expected = format!(
+            indoc! {"
+                ✓ Config: {} (set by --config), 2 profile(s)
+                ✓ 1password (personal): checked OnePassword {{ account: Some(\"my.1password.com\") }}
+                ✓ 1password (work): checked OnePassword {{ account: Some(\"team.1password.com\") }}
+                ✓ Keychain: reachable
+                ✓ SSH agent: running, 1 key(s)
+                ✓ Shell integration: active (zsh)
+            "},
+            config.display()
+        );
+        assert_eq!(writer.contents(), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_counts_failures_but_not_warnings() {
+        let fixture = Fixture::new();
+        let mut client = MockSecretClient::new();
+        client.expect_check().returning(|provider| match provider {
+            Provider::OnePassword { account }
+                if account.as_deref() == Some("team.1password.com") =>
+            {
+                Err(anyhow::anyhow!(
+                    "op does not know account team.1password.com (run: op account add)"
+                ))
+            }
+            _ => Ok("fine".into()),
+        });
+        let mut agent = MockKeyAgent::new();
+        agent
+            .expect_fingerprints()
+            .returning(|| Err(anyhow::anyhow!("SSH agent is not running")));
+        let (mut cmd, writer) = doctor(&fixture, client, agent);
+
+        let result = cmd.execute(&DoctorCommandArgs {
+            parent: fixture.parent(),
+            shell: None,
+        });
+
+        assert_eq!(result.unwrap_err().to_string(), "found 2 problem(s)");
+        let output = writer.contents();
+        assert!(output.contains("✗ 1password (work): op does not know account team.1password.com (run: op account add)\n"));
+        assert!(output.contains("✗ SSH agent: SSH agent is not running\n"));
+        assert!(output.contains("! Shell integration: not active in this shell"));
+    }
+
+    #[test]
+    fn doctor_checks_the_rest_without_a_config() {
+        let fixture = Fixture::new();
+        let mut client = MockSecretClient::new();
+        client.expect_check().never();
+        let mut agent = MockKeyAgent::new();
+        agent.expect_fingerprints().never();
+        let (mut cmd, writer) = doctor(&fixture, client, agent);
+
+        let result = cmd.execute(&DoctorCommandArgs {
+            parent: ProgramArgs {
+                config: fixture.dir.path().join("missing.yml"),
+                ..fixture.parent()
+            },
+            shell: Some(Shell::Bash),
+        });
+
+        assert_eq!(result.unwrap_err().to_string(), "found 1 problem(s)");
+        let output = writer.contents();
+        assert!(output.starts_with("✗ Config: config file not found: "));
+        assert!(output.contains("✓ Keychain: reachable\n"));
+        assert!(output.ends_with("✓ Shell integration: active (bash)\n"));
+    }
+
+    #[test]
+    fn doctor_skips_the_agent_without_ssh_keys() -> Result<()> {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.parent().config,
+            "version: 1\nprofiles:\n  - name: p\n    provider:\n      type: 1password\n",
+        )?;
+        let mut client = MockSecretClient::new();
+        client.expect_check().returning(|_| Ok("fine".into()));
+        let mut agent = MockKeyAgent::new();
+        agent.expect_fingerprints().never();
+        let (mut cmd, writer) = doctor(&fixture, client, agent);
+
+        cmd.execute(&DoctorCommandArgs {
+            parent: fixture.parent(),
+            shell: Some(Shell::Zsh),
+        })?;
+
+        assert!(!writer.contents().contains("SSH agent"));
+        Ok(())
     }
 
     #[test]
