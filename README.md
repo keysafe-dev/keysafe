@@ -11,7 +11,7 @@
 - **SSH keys** are added to ssh-agent with an expiration, piped through `ssh-add` without touching the disk.
 - Secrets never appear in process arguments.
 
-For zsh, the [zsh-op](https://github.com/zsh-contrib/zsh-op) plugin wraps `secret-env` with the `op-shell` and `op-secret` commands, completions, and automatic export on shell startup.
+Add one line to your shell's startup file and `secret-env` sets up your secrets in every new shell, with completions for your profiles and secrets.
 
 ## Requirements
 
@@ -80,6 +80,36 @@ Each account is a **profile**. Secret names of `env` and `file` secrets must be 
 
 The defaults are shared with zsh-op, so both use the same config and cache.
 
+## Shell integration
+
+Add to `~/.zshrc`:
+
+```zsh
+eval "$(secret-env init zsh)"
+```
+
+or to `~/.bashrc`:
+
+```bash
+eval "$(secret-env init bash)"
+```
+
+This defines a `secret-env` shell function, so the commands that set variables apply them to your current shell:
+
+```bash
+secret-env shell work -e 8h        # env + file secrets of a profile, and its SSH keys with 8h expiration
+secret-env export -p work          # env + file secrets only
+secret-env secret -x GITHUB_TOKEN  # a single secret
+```
+
+On every new shell, it also:
+
+- exports the cached secrets of the profiles you loaded before, from the keychain only, without contacting 1Password (`init zsh --no-export` turns this off),
+- completes commands, options, profile names and secret names,
+- removes the files of file secrets when the shell exits.
+
+**Coming from zsh-op?** The config, the cache and the keychain items are shared, so `secret-env init zsh` picks up where the plugin left off.
+
 ## Usage
 
 ```
@@ -93,14 +123,13 @@ Commands:
   export   Export the environment and file secrets of a profile as shell statements.
   exec     Execute a command with the secrets of a profile in its environment.
   clear    Clear the cached secrets of a profile.
+  init     Print the shell integration script for zsh or bash.
 ```
 
-A program can't change the environment of the shell that started it, so commands that set variables print `export` statements for your shell to `eval`:
+Without the shell integration, for example in scripts, `shell`, `export` and `secret -x` print `export` statements to evaluate yourself. A program can't change the environment of the shell that started it:
 
 ```bash
-eval "$(secret-env shell work -e 8h)"      # env + file secrets, SSH keys with 8h expiration
-eval "$(secret-env export -p work)"        # env + file secrets only
-eval "$(secret-env secret -x GITHUB_TOKEN)" # a single secret
+eval "$(secret-env export -p work)"
 ```
 
 Other commands:
@@ -116,9 +145,9 @@ secret-env clear -p work                   # delete the cached secrets of a prof
 
 Add `--refresh` (`-r`) to `shell`, `secret`, `export` or `exec` to bypass the cache and fetch from 1Password again.
 
-`export --all --cached` exports every previously loaded profile from the keychain only, without contacting 1Password. This is what zsh-op runs on shell startup.
+`export --all --cached` exports every previously loaded profile from the keychain only, without contacting 1Password, which is what the shell integration does on startup.
 
-File secrets are written to `--runtime-dir` when given. Otherwise `secret-env` creates a private temporary directory and tells you to remove it when done; `exec` removes its own once the command exits.
+File secrets are written to `--runtime-dir` when given. Otherwise `secret-env` creates a private temporary directory: the shell integration removes it when the shell exits, `exec` once the command exits, and otherwise you are told to remove it when done.
 
 ## How It Works
 
