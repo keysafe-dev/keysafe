@@ -31,57 +31,49 @@ fn secret_env(dir: &Path) -> assert_cmd::Command {
     cmd.env_remove("SECRET_ENV_DEFAULT_PROFILE")
         .env("HOME", dir)
         .env("SECRET_ENV_CONFIG_FILE", dir.join("config.yml"))
-        .env("SECRET_ENV_CACHE_DIR", dir.join("cache"));
+        .env("SECRET_ENV_STATE_DIR", dir.join("cache"));
     cmd
 }
 
 #[test]
 fn help_lists_subcommands() {
     cargo_bin_cmd!().arg("--help").assert().success().stdout(
-        predicate::str::contains("inspect")
-            .and(predicate::str::contains("shell"))
-            .and(predicate::str::contains("secret"))
+        predicate::str::contains("load")
+            .and(predicate::str::contains("read"))
             .and(predicate::str::contains("export"))
-            .and(predicate::str::contains("exec")),
+            .and(predicate::str::contains("exec"))
+            .and(predicate::str::contains("profile"))
+            .and(predicate::str::contains("init")),
     );
 }
 
 #[test]
-fn list_profiles() {
+fn profile_list_prints_profiles() {
     let dir = workspace(CONFIG);
     secret_env(dir.path())
-        .arg("list")
+        .args(["profile", "list"])
         .assert()
         .success()
         .stdout("personal\nwork\n");
 }
 
 #[test]
-fn list_secrets_with_config_flag() {
-    let dir = workspace(CONFIG);
-    cargo_bin_cmd!()
-        .args(["list", "--profile", "personal", "--config"])
-        .arg(dir.path().join("config.yml"))
-        .assert()
-        .success()
-        .stdout("GITHUB_TOKEN\nmy-key\n");
-}
-
-#[test]
-fn inspect_shows_profiles() {
+fn profile_show_with_config_flag() {
     let dir = workspace(CONFIG);
     secret_env(dir.path())
-        .args(["inspect", "-p", "work"])
+        .env_remove("SECRET_ENV_CONFIG_FILE")
+        .args(["profile", "show", "work", "--config"])
+        .arg(dir.path().join("config.yml"))
         .assert()
         .success()
         .stdout("Profile: work\n  Account: team.1password.com\n  Loaded: no\n");
 }
 
 #[test]
-fn inspect_fails_when_config_missing() {
+fn profile_show_fails_when_config_missing() {
     let dir = tempfile::tempdir().unwrap();
     secret_env(dir.path())
-        .arg("inspect")
+        .args(["profile", "show"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -90,10 +82,10 @@ fn inspect_fails_when_config_missing() {
 }
 
 #[test]
-fn inspect_fails_on_invalid_config() {
+fn profile_show_fails_on_invalid_config() {
     let dir = workspace(&CONFIG.replace("kind: env", "kind: token"));
     secret_env(dir.path())
-        .arg("inspect")
+        .args(["profile", "show"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -122,10 +114,10 @@ fn export_rejects_cached_with_refresh() {
 }
 
 #[test]
-fn secret_fails_for_unknown_profile() {
+fn read_fails_for_unknown_profile() {
     let dir = workspace(CONFIG);
     secret_env(dir.path())
-        .args(["secret", "-p", "staging", "GITHUB_TOKEN"])
+        .args(["read", "-p", "staging", "GITHUB_TOKEN"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -134,14 +126,111 @@ fn secret_fails_for_unknown_profile() {
 }
 
 #[test]
-fn shell_uses_default_profile_from_environment() {
+fn load_uses_default_profile_from_environment() {
     let dir = workspace(CONFIG);
     secret_env(dir.path())
         .env("SECRET_ENV_DEFAULT_PROFILE", "staging")
-        .arg("shell")
+        .arg("load")
         .assert()
         .failure()
         .stderr(predicate::str::contains("profile 'staging' not found"));
+}
+
+/// Returns a secret-env command with `dir` as home and no location set explicitly, so the
+/// default locations apply.
+fn secret_env_defaults(dir: &Path) -> assert_cmd::Command {
+    let mut cmd = cargo_bin_cmd!();
+    for var in [
+        "SECRET_ENV_CONFIG_FILE",
+        "SECRET_ENV_STATE_DIR",
+        "SECRET_ENV_DEFAULT_PROFILE",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.env("HOME", dir);
+    cmd
+}
+
+#[test]
+fn default_config_follows_xdg_config_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("xdg/secret-env/config.yml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, CONFIG).unwrap();
+
+    secret_env_defaults(dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("xdg"))
+        .args(["profile", "list"])
+        .assert()
+        .success()
+        .stdout("personal\nwork\n");
+}
+
+#[test]
+fn default_config_falls_back_to_the_legacy_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".config/op/config.yml");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, CONFIG).unwrap();
+
+    secret_env_defaults(dir.path())
+        .args(["profile", "list"])
+        .assert()
+        .success()
+        .stdout("personal\nwork\n")
+        .stderr(predicate::str::contains(format!(
+            "using {}; move it to {}",
+            legacy.display(),
+            dir.path().join(".config/secret-env/config.yml").display()
+        )));
+
+    // The hint is left out of `init`, which runs on every shell start
+    secret_env_defaults(dir.path())
+        .args(["init", "zsh"])
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn default_config_prefers_the_new_location() {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, config) in [
+        (
+            ".config/op/config.yml",
+            CONFIG.replace("name: work", "name: legacy"),
+        ),
+        (".config/secret-env/config.yml", CONFIG.to_string()),
+    ] {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, config).unwrap();
+    }
+
+    secret_env_defaults(dir.path())
+        .args(["profile", "list"])
+        .assert()
+        .success()
+        .stdout("personal\nwork\n")
+        .stderr("");
+}
+
+#[test]
+fn profile_show_reads_legacy_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join(".config/secret-env/config.yml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, CONFIG).unwrap();
+    std::fs::create_dir_all(dir.path().join(".cache/op")).unwrap();
+    std::fs::write(dir.path().join(".cache/op/work.metadata"), "env:API_KEY\n").unwrap();
+
+    secret_env_defaults(dir.path())
+        .args(["profile", "show", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Loaded: yes"));
 }
 
 #[test]
@@ -163,7 +252,7 @@ fn run_shell(shell: &str, dir: &Path, script: &str) -> std::process::Output {
         .env_remove("SECRET_ENV_DEFAULT_PROFILE")
         .env("HOME", dir)
         .env("SECRET_ENV_CONFIG_FILE", dir.join("config.yml"))
-        .env("SECRET_ENV_CACHE_DIR", dir.join("cache"))
+        .env("SECRET_ENV_STATE_DIR", dir.join("cache"))
         .output()
         .unwrap()
 }
@@ -223,7 +312,7 @@ fn init_scripts_are_valid_shell() {
 fn init_function_passes_other_commands_through() {
     let dir = workspace(CONFIG);
     for shell in ["zsh", "bash"] {
-        let output = with_init(shell, dir.path(), "secret-env list");
+        let output = with_init(shell, dir.path(), "secret-env profile list");
         assert_eq!(stdout(&output), "personal\nwork\n", "{shell}");
     }
 }
@@ -248,7 +337,7 @@ fn init_function_returns_the_exit_status() {
         let output = with_init(
             shell,
             dir.path(),
-            "secret-env shell staging; echo \"rc=$?\"",
+            "secret-env load -p staging; echo \"rc=$?\"",
         );
         assert_eq!(stdout(&output), "rc=1\n", "{shell}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("profile 'staging' not found"));
@@ -260,9 +349,8 @@ fn init_function_evaluates_fd3_and_prints_stdout() {
     let dir = workspace(CONFIG);
     let stub = stub(dir.path(), "export ROUTED=yes", "raw output", 3);
     for shell in ["zsh", "bash"] {
-        let script = format!(
-            "_SECRET_ENV_BIN='{stub}'\nsecret-env secret -x A; echo \"rc=$? ROUTED=$ROUTED\""
-        );
+        let script =
+            format!("_SECRET_ENV_BIN='{stub}'\nsecret-env load A; echo \"rc=$? ROUTED=$ROUTED\"");
         let output = with_init(shell, dir.path(), &script);
         assert_eq!(stdout(&output), "raw output\nrc=3 ROUTED=yes\n", "{shell}");
         let eval = std::fs::read_to_string(dir.path().join("eval")).unwrap();
