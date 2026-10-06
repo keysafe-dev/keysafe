@@ -23,6 +23,7 @@ fn main() -> ExitCode {
     // one `exec` starts, must not inherit them.
     std::env::remove_var("KEYSAFE_EVAL");
     std::env::remove_var("KEYSAFE_RUNTIME_DIR");
+    std::env::remove_var("KEYSAFE_SHELL");
 
     // Keep working with the config used before keysafe had its own name. The hint is
     // left out of `init`, which runs on every shell start.
@@ -76,6 +77,24 @@ fn run(program: Program) -> Result<ExitCode> {
             let loader = loader(&args.parent);
             let mut command = ExecCommand { loader };
             return Ok(exit_code(command.execute(&args)?));
+        }
+        ProgramCommand::Status(args) => {
+            let writer = Box::new(std::io::stdout());
+            let cache = cache(&args.parent);
+            let agent = Box::new(Agent::new());
+            let environment = std::env::vars().collect();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let mut command = StatusCommand {
+                writer,
+                cache,
+                agent,
+                environment,
+                now,
+            };
+            command.execute(&args)?
         }
         ProgramCommand::Profile(args) => match args.command {
             ProfileCommand::List(args) => {

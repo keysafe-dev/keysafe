@@ -14,7 +14,7 @@ keysafe() {
     case "$1" in
     load | export) ;;
     *)
-        command "$_KEYSAFE_BIN" "$@"
+        KEYSAFE_SHELL=zsh command "$_KEYSAFE_BIN" "$@"
         return
         ;;
     esac
@@ -26,7 +26,7 @@ keysafe() {
         statements="$(
             [[ -n "${_KEYSAFE_RUNTIME_DIR-}" ]] &&
                 export KEYSAFE_RUNTIME_DIR="$_KEYSAFE_RUNTIME_DIR"
-            KEYSAFE_EVAL=zsh command "$_KEYSAFE_BIN" "$@" 3>&1 1>&4 4>&-
+            KEYSAFE_EVAL=zsh KEYSAFE_SHELL=zsh command "$_KEYSAFE_BIN" "$@" 3>&1 1>&4 4>&-
         )"
         rc=$?
     } 4>&1

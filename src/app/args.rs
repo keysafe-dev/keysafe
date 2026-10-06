@@ -139,11 +139,20 @@ pub enum ProgramCommand {
     )]
     Exec(ExecCommandArgs),
 
+    /// Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.
+    #[command(
+        name = "status",
+        about = "Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.",
+        long_about = "Show, for each profile, which of its variables are set in this shell, which of its SSH keys are in ssh-agent and when they expire, and whether its cached secrets are exported in new shells. Secret values are never printed.",
+        next_display_order = 5
+    )]
+    Status(StatusCommandArgs),
+
     /// List, show and clear profiles.
     #[command(
         name = "profile",
         about = "List, show and clear profiles.",
-        next_display_order = 5
+        next_display_order = 6
     )]
     Profile(ProfileCommandArgs),
 
@@ -152,7 +161,7 @@ pub enum ProgramCommand {
         name = "init",
         about = "Print the shell integration script for zsh or bash.",
         long_about = "Print a script that defines the `keysafe` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `eval \"$(keysafe init bash)\"` to ~/.bashrc.",
-        next_display_order = 6
+        next_display_order = 7
     )]
     Init(InitCommandArgs),
 }
@@ -165,6 +174,7 @@ impl ProgramCommand {
             Self::Read(args) => &mut args.parent,
             Self::Export(args) => &mut args.parent,
             Self::Exec(args) => &mut args.parent,
+            Self::Status(args) => &mut args.parent,
             Self::Profile(args) => match &mut args.command {
                 ProfileCommand::List(args) => &mut args.parent,
                 ProfileCommand::Show(args) => &mut args.parent,
@@ -213,6 +223,15 @@ pub enum Shell {
 
     /// Bash.
     Bash,
+}
+
+impl Display for Shell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Zsh => write!(f, "zsh"),
+            Self::Bash => write!(f, "bash"),
+        }
+    }
 }
 
 impl From<Shell> for ExportFormat {
@@ -324,13 +343,12 @@ pub struct LoadCommandArgs {
 
     /// Profile the secrets belong to.
     #[arg(
-        help = "Profile name.",
+        help = "Profile name (the default profile if not provided).",
         env = "KEYSAFE_DEFAULT_PROFILE",
-        default_value = "personal",
         long,
         short
     )]
-    pub profile: String,
+    pub profile: Option<String>,
 
     /// Lifetime of the SSH keys added to ssh-agent.
     #[arg(
@@ -363,17 +381,33 @@ pub struct ReadCommandArgs {
 
     /// Profile the secret belongs to.
     #[arg(
-        help = "Profile name.",
+        help = "Profile name (the default profile if not provided).",
         env = "KEYSAFE_DEFAULT_PROFILE",
-        default_value = "personal",
         long,
         short
     )]
-    pub profile: String,
+    pub profile: Option<String>,
 
     /// Bypass the keychain cache and fetch the secret from 1Password.
     #[arg(help = "Force refresh from 1Password.", long, short)]
     pub refresh: bool,
+}
+
+/// StatusCommandArgs defines the arguments for the StatusCommand.
+#[derive(Debug, Args)]
+pub struct StatusCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+
+    /// Profile to show. Every profile is shown if not provided.
+    #[arg(help = "Profile name (all profiles if not provided).", long, short)]
+    pub profile: Option<String>,
+
+    /// Shell whose integration runs this command.
+    /// Set by the script that `init` prints; not meant to be set by hand.
+    #[arg(long, env = "KEYSAFE_SHELL", hide = true)]
+    pub shell: Option<Shell>,
 }
 
 /// ProfileCommandArgs defines the arguments for the profile subcommands.
@@ -425,13 +459,12 @@ pub struct ExportCommandArgs {
 
     /// Profile to export.
     #[arg(
-        help = "Profile name.",
+        help = "Profile name (the default profile if not provided).",
         env = "KEYSAFE_DEFAULT_PROFILE",
-        default_value = "personal",
         long,
         short
     )]
-    pub profile: String,
+    pub profile: Option<String>,
 
     /// Export every profile instead of a single one.
     #[arg(help = "Export every profile.", long, short)]
@@ -463,13 +496,12 @@ pub struct ExecCommandArgs {
 
     /// Profile whose secrets are applied.
     #[arg(
-        help = "Profile name.",
+        help = "Profile name (the default profile if not provided).",
         env = "KEYSAFE_DEFAULT_PROFILE",
-        default_value = "personal",
         long,
         short
     )]
-    pub profile: String,
+    pub profile: Option<String>,
 
     /// Bypass the keychain cache and fetch every secret from 1Password.
     #[arg(help = "Force refresh from 1Password.", long, short)]
@@ -581,7 +613,7 @@ mod tests {
             panic!("expected the load command");
         };
         assert_eq!(args.names, ["API_KEY", "deploy-key"]);
-        assert_eq!(args.profile, "work");
+        assert_eq!(args.profile.as_deref(), Some("work"));
         assert_eq!(args.expiration, "8h");
     }
 
