@@ -3,7 +3,7 @@ mod log;
 mod vault;
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -71,6 +71,8 @@ fn main() -> ExitCode {
 fn run(program: Program) -> Result<ExitCode> {
     match program.command {
         ProgramCommand::Load(args) => {
+            args.output
+                .check_destination("load", std::io::stdout().is_terminal())?;
             let writer = statements(&args.output);
             let loader = loader(&args.parent);
             let agent = Box::new(Agent::new());
@@ -82,6 +84,8 @@ fn run(program: Program) -> Result<ExitCode> {
             command.execute(&args)?
         }
         ProgramCommand::Unload(args) => {
+            args.output
+                .check_destination("unload", std::io::stdout().is_terminal())?;
             let writer = statements(&args.output);
             let cache = cache(&args.parent);
             let agent = Box::new(Agent::new());

@@ -465,6 +465,22 @@ impl OutputArgs {
         self.eval.is_some() && self.format.is_none()
     }
 
+    /// Fails when the shell statements of `command` would only be printed on a terminal:
+    /// without the shell integration and without an explicit --format, they would show
+    /// secret values on screen without changing the shell.
+    pub fn check_destination(&self, command: &str, stdout_is_terminal: bool) -> anyhow::Result<()> {
+        if stdout_is_terminal && self.eval.is_none() && self.format.is_none() {
+            let (shell, rc) = match self.export_format() {
+                ExportFormat::Bash => ("bash", "~/.bashrc"),
+                _ => ("zsh", "~/.zshrc"),
+            };
+            anyhow::bail!(
+                "`{command}` changes your shell through the shell integration, which isn't active here; add `eval \"$(keysafe init {shell})\"` to {rc}, or run `eval \"$(keysafe {command})\"`"
+            );
+        }
+        Ok(())
+    }
+
     /// Get the export format: the explicit one, the integration's shell, or $SHELL detection.
     pub fn export_format(&self) -> ExportFormat {
         self.format
@@ -851,6 +867,36 @@ mod tests {
         };
         assert_eq!(args.export_format(), ExportFormat::Json);
         assert!(!args.is_eval());
+    }
+
+    #[test]
+    fn statements_are_not_printed_on_a_terminal_without_the_integration() {
+        let plain = OutputArgs {
+            format: None,
+            eval: None,
+            ..Default::default()
+        };
+        let err = plain
+            .check_destination("load", true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("`load` changes your shell through the shell integration"),
+            "{err}"
+        );
+
+        // Piped or evaluated, under the integration, or with an explicit format: printed
+        assert!(plain.check_destination("load", false).is_ok());
+        let integrated = OutputArgs {
+            eval: Some(Shell::Zsh),
+            ..Default::default()
+        };
+        assert!(integrated.check_destination("load", true).is_ok());
+        let explicit = OutputArgs {
+            format: Some(ExportFormat::Zsh),
+            ..Default::default()
+        };
+        assert!(explicit.check_destination("unload", true).is_ok());
     }
 
     #[test]
