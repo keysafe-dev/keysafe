@@ -6,13 +6,13 @@
 
 typeset -g _KEYSAFE_BIN={{bin}}
 
-# Wrap the binary, so that `load` and `export` change the current shell. The
-# binary writes the shell statements to fd 3, which is captured and
-# evaluated; everything else (values, JSON, help, errors) goes straight to
-# the terminal.
+# Wrap the binary, so that `load`, `unload` and `export` change the current
+# shell. The binary writes the shell statements to fd 3, which is captured
+# and evaluated; everything else (values, JSON, help, errors) goes straight
+# to the terminal.
 keysafe() {
     case "$1" in
-    load | export) ;;
+    load | unload | export) ;;
     *)
         KEYSAFE_SHELL=zsh command "$_KEYSAFE_BIN" "$@"
         return

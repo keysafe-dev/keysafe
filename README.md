@@ -100,7 +100,7 @@ or to `~/.bashrc`:
 eval "$(keysafe init bash)"
 ```
 
-This defines a `keysafe` shell function, so `load` and `export` apply secrets to your current shell. On every new shell, it also:
+This defines a `keysafe` shell function, so `load`, `unload` and `export` change your current shell. On every new shell, it also:
 
 - exports the cached secrets of the profiles you loaded before, from the keychain only, without contacting 1Password (`init zsh --no-export` turns this off),
 - completes commands, options, profile names and secret names,
@@ -113,6 +113,7 @@ Usage: keysafe <COMMAND>
 
 Commands:
   load     Load secrets of a profile into the current shell.
+  unload   Unload secrets of a profile from the current shell.
   read     Print the value of a secret.
   export   Export the environment and file secrets of a profile as shell statements.
   exec     Execute a command with the secrets of a profile in its environment.
@@ -133,6 +134,15 @@ keysafe load github-work -e 4h        # one SSH key
 ```
 
 Loading a whole profile records it, so its cached secrets are exported in every new shell. Loading individual secrets doesn't.
+
+`unload` undoes `load`: it unsets the variables, deletes the files of file secrets and removes the SSH keys keysafe added from ssh-agent.
+
+```bash
+keysafe unload -p work                # the whole profile; new shells no longer get it either
+keysafe unload GITHUB_TOKEN           # one secret
+```
+
+The cached secrets stay in the keychain, so loading again is instant. `keysafe profile clear` deletes them.
 
 ### Reading and running
 
