@@ -299,7 +299,9 @@ mod tests {
             version: 1
             profiles:
               - name: personal
-                account: my.1password.com
+                provider:
+                  type: 1password
+                  account: my.1password.com
                 secrets:
                   - kind: env
                     name: GITHUB_TOKEN

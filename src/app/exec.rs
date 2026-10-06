@@ -481,7 +481,12 @@ impl ProfileShowCommand {
             }
             let loaded = self.cache.loaded(&account.name)?.is_some();
             writeln!(self.writer, "Profile: {}", account.name)?;
-            writeln!(self.writer, "  Account: {}", account.account)?;
+            match &account.provider {
+                Provider::OnePassword {
+                    account: Some(name),
+                } => writeln!(self.writer, "  Provider: {} ({name})", account.provider)?,
+                provider => writeln!(self.writer, "  Provider: {provider}")?,
+            }
             writeln!(
                 self.writer,
                 "  Loaded: {}",
@@ -560,7 +565,9 @@ mod tests {
         version: 1
         profiles:
           - name: personal
-            account: my.1password.com
+            provider:
+              type: 1password
+              account: my.1password.com
             secrets:
               - kind: env
                 name: GITHUB_TOKEN
@@ -572,7 +579,9 @@ mod tests {
                 name: my-key
                 path: op://Private/SSH/private key?ssh-format=openssh
           - name: work
-            account: team.1password.com
+            provider:
+              type: 1password
+              account: team.1password.com
             secrets:
               - kind: env
                 name: API_KEY
@@ -770,7 +779,7 @@ mod tests {
 
         let expected = indoc! {"
             Profile: personal
-              Account: my.1password.com
+              Provider: 1password (my.1password.com)
               Loaded: yes
               Secrets:
                 env  GITHUB_TOKEN (op://Personal/GitHub/token)
@@ -778,7 +787,7 @@ mod tests {
                 ssh  my-key (op://Private/SSH/private key?ssh-format=openssh)
 
             Profile: work
-              Account: team.1password.com
+              Provider: 1password (team.1password.com)
               Loaded: no
               Secrets:
                 env  API_KEY (op://Infra/Prod/API_KEY)

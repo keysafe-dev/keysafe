@@ -43,7 +43,7 @@ impl Loader {
             }
         }
 
-        let value = self.client.read(&account.account, &secret.path)?;
+        let value = self.client.read(&account.provider, &secret.path)?;
         // A failed cache write only costs a 1Password round trip next time.
         if let Err(err) = self.cache.set(&account.name, &secret.name, &value) {
             warn(format!("{err:#}"));

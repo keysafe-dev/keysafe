@@ -3,6 +3,7 @@ use std::{fmt::Display, path::Path};
 
 /// Raw representation of the configuration file, before validation.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Spec {
     /// Version of the configuration format.
     version: Option<serde_yaml_ng::Value>,
@@ -15,15 +16,37 @@ struct Spec {
 
 /// Raw representation of a configured profile, before validation.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProfileSpec {
     name: Option<String>,
-    account: Option<String>,
+    provider: Option<ProviderSpec>,
+    /// The 1Password account, which used to sit on the profile itself.
+    account: Option<serde_yaml_ng::Value>,
     #[serde(default)]
     secrets: Vec<SecretSpec>,
 }
 
+/// Raw representation of a configured provider, selected by its `type`.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum ProviderSpec {
+    #[serde(rename = "1password", alias = "onepassword")]
+    OnePassword { account: Option<String> },
+}
+
+impl From<ProviderSpec> for Provider {
+    fn from(spec: ProviderSpec) -> Self {
+        match spec {
+            ProviderSpec::OnePassword { account } => Self::OnePassword {
+                account: account.filter(|s| !s.is_empty()),
+            },
+        }
+    }
+}
+
 /// Raw representation of a configured secret, before validation.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SecretSpec {
     kind: Option<String>,
     name: Option<String>,
@@ -103,10 +126,13 @@ impl TryFrom<Spec> for Config {
             if profiles.iter().any(|a: &Profile| a.name == name) {
                 bail!("profile '{name}' is defined more than once");
             }
-            let url = profile
-                .account
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("profile '{name}' missing 'account' field"))?;
+            if profile.account.is_some() {
+                bail!("profile '{name}' has 'account': move it into its provider (provider: {{ type: 1password, account: ... }})");
+            }
+            let provider: Provider = profile
+                .provider
+                .ok_or_else(|| anyhow!("profile '{name}' missing 'provider' field"))?
+                .into();
 
             let mut secrets = Vec::new();
             for (j, secret) in profile.secrets.into_iter().enumerate() {
@@ -131,8 +157,9 @@ impl TryFrom<Spec> for Config {
                 let path = secret.path.filter(|s| !s.is_empty()).ok_or_else(|| {
                     anyhow!("secret '{secret_name}' in profile '{name}' missing 'path' field")
                 })?;
-                if !path.starts_with("op://") {
-                    bail!("secret '{secret_name}' has invalid path: {path} (path must start with 'op://')");
+                let scheme = provider.scheme();
+                if !path.starts_with(scheme) {
+                    bail!("secret '{secret_name}' has invalid path: {path} (path must start with '{scheme}' for provider {provider})");
                 }
                 if secrets.iter().any(|s: &Secret| s.name == secret_name) {
                     bail!("secret '{secret_name}' is defined more than once in profile '{name}'");
@@ -147,7 +174,7 @@ impl TryFrom<Spec> for Config {
 
             profiles.push(Profile {
                 name,
-                account: url,
+                provider,
                 secrets,
             });
         }
@@ -163,15 +190,43 @@ fn is_variable_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// A profile: a 1Password account and the secrets loaded from it.
+/// A profile: a provider and the secrets loaded from it.
 #[derive(Debug, Clone)]
 pub struct Profile {
     /// Profile name.
     pub name: String,
-    /// 1Password account URL (e.g. my.1password.com).
-    pub account: String,
+    /// Password manager the secrets are read from.
+    pub provider: Provider,
     /// Secrets loaded by this profile.
     pub secrets: Vec<Secret>,
+}
+
+/// Provider is the password manager a profile reads its secrets from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provider {
+    /// 1Password, through its CLI (`op`).
+    OnePassword {
+        /// Account to read from, as accepted by `op --account`: a sign-in address, an email
+        /// address or an account ID. The CLI's default account is used if not set.
+        account: Option<String>,
+    },
+}
+
+impl Provider {
+    /// Returns the prefix of the secret references this provider reads.
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            Self::OnePassword { .. } => "op://",
+        }
+    }
+}
+
+impl Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OnePassword { .. } => write!(f, "1password"),
+        }
+    }
 }
 
 impl Profile {
@@ -250,7 +305,9 @@ mod tests {
         version: 1
         profiles:
           - name: personal
-            account: my.1password.com
+            provider:
+              type: 1password
+              account: my.1password.com
             secrets:
               - kind: env
                 name: GITHUB_TOKEN
@@ -262,12 +319,14 @@ mod tests {
                 name: GOOGLE_APPLICATION_CREDENTIALS
                 path: op://Personal/GCP/service-account
           - name: work
-            account: team.1password.com
+            provider:
+              type: 1password
+              account: team.1password.com
     "};
 
     /// Builds a single-account config around the given secrets YAML block.
     fn with_secrets(secrets: &str) -> String {
-        format!("version: 1\nprofiles:\n  - name: p\n    account: a.1password.com\n    secrets:\n{secrets}")
+        format!("version: 1\nprofiles:\n  - name: p\n    provider:\n      type: 1password\n      account: a.1password.com\n    secrets:\n{secrets}")
     }
 
     fn parse_err(data: &str) -> String {
@@ -280,7 +339,12 @@ mod tests {
         assert_eq!(config.profiles.len(), 2);
 
         let personal = config.profile("personal").unwrap();
-        assert_eq!(personal.account, "my.1password.com");
+        assert_eq!(
+            personal.provider,
+            Provider::OnePassword {
+                account: Some("my.1password.com".into())
+            }
+        );
         assert_eq!(
             personal.secrets.iter().map(|s| s.kind).collect::<Vec<_>>(),
             vec![SecretKind::Env, SecretKind::Ssh, SecretKind::File]
@@ -337,14 +401,15 @@ mod tests {
     #[test]
     fn parse_fails_when_account_name_is_not_path_safe() {
         assert_eq!(
-            parse_err("version: 1\nprofiles:\n  - name: ../p\n    account: a.1password.com\n"),
+            parse_err("version: 1\nprofiles:\n  - name: ../p\n    provider:\n      type: 1password\n      account: a.1password.com\n"),
             "profile name '../p' may only contain letters, digits, '.', '_' and '-'"
         );
     }
 
     #[test]
     fn parse_fails_when_account_name_is_duplicated() {
-        let account = "  - name: p\n    account: a.1password.com\n";
+        let account =
+            "  - name: p\n    provider:\n      type: 1password\n      account: a.1password.com\n";
         assert_eq!(
             parse_err(&format!("version: 1\nprofiles:\n{}", account.repeat(2))),
             "profile 'p' is defined more than once"
@@ -352,10 +417,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_fails_when_account_url_is_missing() {
+    fn parse_accepts_1password_without_account() {
+        let config = Config::parse(
+            "version: 1\nprofiles:\n  - name: p\n    provider:\n      type: 1password\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.profiles[0].provider,
+            Provider::OnePassword { account: None }
+        );
+    }
+
+    #[test]
+    fn parse_accepts_onepassword_as_provider_alias() {
+        let data = VALID.replacen("type: 1password", "type: onepassword", 1);
+        let config = Config::parse(&data).unwrap();
+        assert_eq!(config.profiles[0].provider.to_string(), "1password");
+    }
+
+    #[test]
+    fn parse_fails_on_unknown_provider() {
+        let data = VALID.replacen("type: 1password", "type: keepass", 1);
+        let err = parse_err(&data);
+        assert!(err.contains("unknown variant `keepass`"), "{err}");
+    }
+
+    #[test]
+    fn parse_fails_on_account_outside_the_provider() {
+        let data = "version: 1\nprofiles:\n  - name: p\n    account: a.1password.com\n";
+        assert_eq!(
+            parse_err(data),
+            "profile 'p' has 'account': move it into its provider (provider: { type: 1password, account: ... })"
+        );
+    }
+
+    #[test]
+    fn parse_fails_on_unknown_fields() {
+        let data = VALID.replacen("    secrets:", "    secret:", 1);
+        let err = parse_err(&data);
+        assert!(err.contains("unknown field `secret`"), "{err}");
+    }
+
+    #[test]
+    fn parse_fails_when_provider_is_missing() {
         assert_eq!(
             parse_err("version: 1\nprofiles:\n  - name: p\n"),
-            "profile 'p' missing 'account' field"
+            "profile 'p' missing 'provider' field"
         );
     }
 
@@ -400,7 +507,7 @@ mod tests {
         let data = with_secrets("      - kind: env\n        name: A\n        path: vault/item\n");
         assert_eq!(
             parse_err(&data),
-            "secret 'A' has invalid path: vault/item (path must start with 'op://')"
+            "secret 'A' has invalid path: vault/item (path must start with 'op://' for provider 1password)"
         );
     }
 

@@ -5,7 +5,9 @@ use std::path::Path;
 const CONFIG: &str = "version: 1
 profiles:
   - name: personal
-    account: my.1password.com
+    provider:
+      type: 1password
+      account: my.1password.com
     secrets:
       - kind: env
         name: GITHUB_TOKEN
@@ -14,7 +16,9 @@ profiles:
         name: my-key
         path: op://Private/SSH/private key?ssh-format=openssh
   - name: work
-    account: team.1password.com
+    provider:
+      type: 1password
+      account: team.1password.com
 ";
 
 /// Returns a temporary directory holding `config.yml` and an empty `cache` directory.
@@ -66,7 +70,7 @@ fn profile_show_with_config_flag() {
         .arg(dir.path().join("config.yml"))
         .assert()
         .success()
-        .stdout("Profile: work\n  Account: team.1password.com\n  Loaded: no\n");
+        .stdout("Profile: work\n  Provider: 1password (team.1password.com)\n  Loaded: no\n");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 # keysafe configuration file
 # Location: ~/.config/keysafe/config.yml
 #
-# This file defines your profiles: a 1Password account each, and the secrets to load from it.
+# This file defines your profiles: where each one reads its secrets from, and which secrets to load.
 # Each profile can have multiple environment variables, files and SSH keys.
 
 version: 1
@@ -9,7 +9,9 @@ version: 1
 profiles:
   # Personal 1Password account
   - name: personal
-    account: my.1password.com
+    provider:
+      type: 1password
+      account: my.1password.com
     secrets:
       # Environment variables
       - kind: env
@@ -40,7 +42,9 @@ profiles:
 
   # Work 1Password account
   - name: work
-    account: team-em.1password.com
+    provider:
+      type: 1password
+      account: team-em.1password.com
     secrets:
       # Environment variables
       - kind: env
@@ -78,9 +82,11 @@ profiles:
 #    - Use descriptive names like "personal", "work", "staging", etc.
 #    - These names are used with: keysafe load -p [profile]
 #
-# 2. Account URLs:
-#    - Must match your 1Password account URL exactly
-#    - Find this in 1Password settings or when signing in
+# 2. Provider:
+#    - type: 1password reads op:// references with the 1Password CLI (op)
+#    - account (optional): the 1Password account to use, as `op --account` takes it:
+#      a sign-in address (my.1password.com), an email address or an account ID.
+#      Without it, the CLI's default account is used.
 #
 # 3. Secret Paths (op:// URIs):
 #    - Format: op://[Vault]/[Item]/[Field]

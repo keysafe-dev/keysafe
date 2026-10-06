@@ -44,7 +44,9 @@ version: 1
 
 profiles:
   - name: personal
-    account: my.1password.com
+    provider:
+      type: 1password
+      account: my.1password.com
     secrets:
       - kind: env
         name: GITHUB_TOKEN
@@ -59,7 +61,9 @@ profiles:
         path: op://Personal/GCP/service-account-json
 
   - name: work
-    account: team.1password.com
+    provider:
+      type: 1password
+      account: team.1password.com
     secrets:
       - kind: env
         name: MYAPP_API_KEY
@@ -68,7 +72,7 @@ profiles:
 
 See [config.example.yml](config.example.yml) for a complete annotated example. To find an `op://` path, right-click an item in the 1Password desktop app and select **Copy Secret Reference**. Append `?ssh-format=openssh` for SSH keys.
 
-Each profile reads its secrets from one 1Password `account`. Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
+Each profile reads its secrets from one `provider`. Today that's `type: 1password`, with an optional `account`: the account to use, as `op --account` takes it (a sign-in address, an email address or an account ID). Without it, the 1Password CLI's default account is used. Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
 
 ### Environment Variables
 
@@ -145,7 +149,7 @@ Add `--refresh` (`-r`) to `load`, `read`, `export` or `exec` to bypass the cache
 
 ```bash
 keysafe profile list          # profile names
-keysafe profile show work     # account, secrets and whether it was loaded (never values)
+keysafe profile show work     # provider, secrets and whether it was loaded (never values)
 keysafe profile clear work    # delete its cached secrets and forget it was loaded
 ```
 
