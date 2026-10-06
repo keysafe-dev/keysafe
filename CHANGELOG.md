@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/keysafe-dev/keysafe/compare/v0.3.0...v0.3.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* release binaries that run without Nix ([#26](https://github.com/keysafe-dev/keysafe/issues/26)) ([01c2819](https://github.com/keysafe-dev/keysafe/commit/01c2819af03536a59179fc887b03e2954332301c))
+
 ## [0.3.0](https://github.com/keysafe-dev/keysafe/compare/v0.2.0...v0.3.0) (2026-10-06)
 
 
