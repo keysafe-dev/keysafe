@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* replace each profile's `account: <account>` with
+* move each profile's `account: <account>` into a `provider` section: `provider: { type: 1password, account: <account> }`.
 * rename `accounts` to `profiles` in the config file.
 
 ### Features
