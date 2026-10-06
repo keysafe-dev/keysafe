@@ -245,6 +245,54 @@ impl Cache {
     }
 }
 
+/// An SSH key keysafe added to an ssh-agent, recorded so `status` can say when it expires.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeyRecord {
+    /// Profile the key belongs to.
+    pub profile: String,
+    /// Name of the key in the profile.
+    pub name: String,
+    /// SHA256 fingerprint, as printed by `ssh-add -l`.
+    pub fingerprint: String,
+    /// When the agent drops the key, in seconds since the Unix epoch.
+    pub expires: u64,
+}
+
+impl Cache {
+    /// Returns the path of the file recording the SSH keys keysafe added to an agent.
+    fn keys_path(&self) -> PathBuf {
+        self.dir.join("agent-keys.json")
+    }
+
+    /// Returns the recorded SSH keys keysafe added to an agent.
+    pub fn keys(&self) -> Result<Vec<KeyRecord>> {
+        let path = self.keys_path();
+        match std::fs::read_to_string(&path) {
+            Ok(data) => serde_json::from_str(&data)
+                .with_context(|| format!("failed to parse {}", path.display())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e).context(format!("failed to read {}", path.display())),
+        }
+    }
+
+    /// Records `added` SSH keys, replacing earlier records of the same keys and dropping
+    /// records that expired before `now`.
+    pub fn record_keys(&self, added: &[KeyRecord], now: u64) -> Result<()> {
+        let mut keys: Vec<KeyRecord> = self
+            .keys()?
+            .into_iter()
+            .filter(|k| k.expires > now && !added.iter().any(|a| a.fingerprint == k.fingerprint))
+            .collect();
+        keys.extend_from_slice(added);
+
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("failed to create {}", self.dir.display()))?;
+        let path = self.keys_path();
+        std::fs::write(&path, serde_json::to_string_pretty(&keys)?)
+            .with_context(|| format!("failed to write {}", path.display()))
+    }
+}
+
 /// MemoryStore is an in-memory [`SecretStore`] used by tests.
 #[cfg(test)]
 #[derive(Clone, Default)]
@@ -329,6 +377,35 @@ mod tests {
         assert!(deleted.unwrap());
         assert_eq!(keychain.get(service, account).unwrap(), None);
         assert!(!keychain.delete(service, account).unwrap());
+    }
+
+    #[test]
+    fn record_keys_replaces_and_expires_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(Box::new(MemoryStore::default()), dir.path());
+        let record = |name: &str, fingerprint: &str, expires| KeyRecord {
+            profile: "work".into(),
+            name: name.into(),
+            fingerprint: fingerprint.into(),
+            expires,
+        };
+        assert_eq!(cache.keys().unwrap(), vec![]);
+
+        cache
+            .record_keys(
+                &[
+                    record("old", "SHA256:a", 100),
+                    record("kept", "SHA256:b", 500),
+                ],
+                0,
+            )
+            .unwrap();
+        cache
+            .record_keys(&[record("new", "SHA256:b", 900)], 200)
+            .unwrap();
+
+        // "old" expired, "kept" was replaced by the new record of the same key
+        assert_eq!(cache.keys().unwrap(), vec![record("new", "SHA256:b", 900)]);
     }
 
     #[test]

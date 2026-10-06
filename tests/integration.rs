@@ -70,7 +70,34 @@ fn profile_show_with_config_flag() {
         .arg(dir.path().join("config.yml"))
         .assert()
         .success()
-        .stdout("Profile: work\n  Provider: 1password (team.1password.com)\n  Loaded: no\n");
+        .stdout("Profile: work\n  Provider: 1password (team.1password.com)\n  Exported in new shells: no\n");
+}
+
+#[test]
+fn profile_show_marks_the_default_profile() {
+    let dir = workspace(&CONFIG.replace("  - name: work\n", "  - name: work\n    default: true\n"));
+    keysafe(dir.path())
+        .args(["profile", "show"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Profile: personal\n")
+                .and(predicate::str::contains("Profile: work (default)\n")),
+        );
+}
+
+#[test]
+fn status_without_shell_integration() {
+    let dir = workspace(CONFIG);
+    keysafe(dir.path())
+        .args(["status", "-p", "work"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("Shell integration: not active").and(
+                predicate::str::contains("Profile: work\n  Exported in new shells: no\n"),
+            ),
+        );
 }
 
 #[test]
@@ -234,7 +261,7 @@ fn profile_show_reads_legacy_state() {
         .args(["profile", "show", "work"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Loaded: yes"));
+        .stdout(predicate::str::contains("Exported in new shells: yes"));
 }
 
 #[test]
@@ -306,6 +333,19 @@ fn init_scripts_are_valid_shell() {
             .status()
             .unwrap();
         assert!(status.success(), "{interpreter} rejects the init script");
+    }
+}
+
+#[test]
+fn init_function_tells_status_the_integration_is_active() {
+    let dir = workspace(CONFIG);
+    for shell in ["zsh", "bash"] {
+        let output = with_init(shell, dir.path(), "keysafe status -p work");
+        assert!(
+            stdout(&output).starts_with(&format!("Shell integration: active ({shell})\n")),
+            "{shell}: {}",
+            stdout(&output)
+        );
     }
 }
 

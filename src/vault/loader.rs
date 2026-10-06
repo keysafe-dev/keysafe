@@ -23,6 +23,15 @@ pub struct Variable {
     pub value: String,
 }
 
+/// What [`Loader::add_key`] did with an SSH key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyOutcome {
+    /// The key was added to the agent, with its fingerprint if it could be computed.
+    Added(Option<String>),
+    /// The agent already held the key, so it was left alone.
+    Present,
+}
+
 /// Loader resolves secret values from the keychain cache or 1Password.
 pub struct Loader {
     /// Client used to fetch secrets from 1Password.
@@ -92,7 +101,7 @@ impl Loader {
     }
 
     /// Adds the SSH key `secret` to the agent, unless the agent already holds it and
-    /// `refresh` is not set. Returns false when the key was already present.
+    /// `refresh` is not set.
     pub fn add_key(
         &self,
         agent: &dyn KeyAgent,
@@ -101,18 +110,15 @@ impl Loader {
         secret: &Secret,
         lifetime: &str,
         refresh: bool,
-    ) -> Result<bool> {
+    ) -> Result<KeyOutcome> {
         let key = self.load(account, secret, refresh)?;
+        let fingerprint = fingerprint(&key).ok();
         // Re-adding a key resets its lifetime, so only do it when a refresh was requested.
-        if !refresh {
-            if let Ok(fingerprint) = fingerprint(&key) {
-                if present.contains(&fingerprint) {
-                    return Ok(false);
-                }
-            }
+        if !refresh && fingerprint.as_ref().is_some_and(|f| present.contains(f)) {
+            return Ok(KeyOutcome::Present);
         }
 
         agent.add(&key, lifetime)?;
-        Ok(true)
+        Ok(KeyOutcome::Added(fingerprint))
     }
 }

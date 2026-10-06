@@ -72,7 +72,11 @@ profiles:
 
 See [config.example.yml](config.example.yml) for a complete annotated example. To find an `op://` path, right-click an item in the 1Password desktop app and select **Copy Secret Reference**. Append `?ssh-format=openssh` for SSH keys.
 
-Each profile reads its secrets from one `provider`. Today that's `type: 1password`, with an optional `account`: the account to use, as `op --account` takes it (a sign-in address, an email address or an account ID). Without it, the 1Password CLI's default account is used. Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
+Each profile reads its secrets from one `provider`. Today that's `type: 1password`, with an optional `account`: the account to use, as `op --account` takes it (a sign-in address, an email address or an account ID). Without it, the 1Password CLI's default account is used.
+
+Commands use the profile marked `default: true`, or the first profile, when you don't pass `-p`.
+
+Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
 
 ### Environment Variables
 
@@ -80,7 +84,7 @@ Each profile reads its secrets from one `provider`. Today that's `type: 1passwor
 |----------|---------|-------------|
 | `KEYSAFE_CONFIG_FILE` | `$XDG_CONFIG_HOME/keysafe/config.yml` (`~/.config/keysafe/config.yml`) | Config file (`--config`) |
 | `KEYSAFE_STATE_DIR` | `$XDG_STATE_HOME/keysafe` (`~/.local/state/keysafe`) | Records which profiles were loaded (`--state-dir`) |
-| `KEYSAFE_DEFAULT_PROFILE` | `personal` | Profile used when none is given (`-p`) |
+| `KEYSAFE_DEFAULT_PROFILE` | the profile marked `default: true`, or the first one | Profile used when none is given (`-p`) |
 
 ## Shell integration
 
@@ -112,6 +116,7 @@ Commands:
   read     Print the value of a secret.
   export   Export the environment and file secrets of a profile as shell statements.
   exec     Execute a command with the secrets of a profile in its environment.
+  status   Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.
   profile  List, show and clear profiles.
   init     Print the shell integration script for zsh or bash.
 ```
@@ -145,11 +150,20 @@ eval "$(keysafe export -p work)"
 
 Add `--refresh` (`-r`) to `load`, `read`, `export` or `exec` to bypass the cache and fetch from 1Password again.
 
+### Status
+
+```bash
+keysafe status                   # every profile: variables set in this shell, SSH keys and their expiry
+keysafe status -p work           # one profile
+```
+
+`status` never prints values. It also tells you whether the shell integration is active.
+
 ### Profiles
 
 ```bash
 keysafe profile list          # profile names
-keysafe profile show work     # provider, secrets and whether it was loaded (never values)
+keysafe profile show work     # provider, secrets and whether it's exported in new shells (never values)
 keysafe profile clear work    # delete its cached secrets and forget it was loaded
 ```
 

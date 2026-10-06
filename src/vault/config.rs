@@ -19,6 +19,9 @@ struct Spec {
 #[serde(deny_unknown_fields)]
 struct ProfileSpec {
     name: Option<String>,
+    /// Whether this profile is used when none is given.
+    #[serde(default)]
+    default: bool,
     provider: Option<ProviderSpec>,
     /// The 1Password account, which used to sit on the profile itself.
     account: Option<serde_yaml_ng::Value>,
@@ -72,6 +75,22 @@ impl Config {
     pub fn parse(data: &str) -> Result<Config> {
         let spec: Spec = serde_yaml_ng::from_str(data)?;
         Self::try_from(spec)
+    }
+
+    /// Returns the default profile: the one marked `default: true`, or else the first one.
+    pub fn default_profile(&self) -> &Profile {
+        self.profiles
+            .iter()
+            .find(|p| p.default)
+            .unwrap_or(&self.profiles[0])
+    }
+
+    /// Returns the profile with the given name, or the default profile if none is given.
+    pub fn resolve(&self, name: Option<&str>) -> Result<&Profile> {
+        match name {
+            Some(name) => self.profile(name),
+            None => Ok(self.default_profile()),
+        }
     }
 
     /// Returns the profile with the given name.
@@ -174,9 +193,22 @@ impl TryFrom<Spec> for Config {
 
             profiles.push(Profile {
                 name,
+                default: profile.default,
                 provider,
                 secrets,
             });
+        }
+
+        let defaults: Vec<&str> = profiles
+            .iter()
+            .filter(|p| p.default)
+            .map(|p| p.name.as_str())
+            .collect();
+        if defaults.len() > 1 {
+            bail!(
+                "more than one profile is marked as default: {}",
+                defaults.join(", ")
+            );
         }
 
         Ok(Config { profiles })
@@ -195,6 +227,8 @@ fn is_variable_name(name: &str) -> bool {
 pub struct Profile {
     /// Profile name.
     pub name: String,
+    /// Whether this profile is used when none is given.
+    pub default: bool,
     /// Password manager the secrets are read from.
     pub provider: Provider,
     /// Secrets loaded by this profile.
@@ -456,6 +490,32 @@ mod tests {
         let data = VALID.replacen("    secrets:", "    secret:", 1);
         let err = parse_err(&data);
         assert!(err.contains("unknown field `secret`"), "{err}");
+    }
+
+    #[test]
+    fn default_profile_is_the_first_one_unless_marked() {
+        let config = Config::parse(VALID).unwrap();
+        assert_eq!(config.default_profile().name, "personal");
+        assert_eq!(config.resolve(None).unwrap().name, "personal");
+        assert_eq!(config.resolve(Some("work")).unwrap().name, "work");
+
+        let data = VALID.replace("  - name: work\n", "  - name: work\n    default: true\n");
+        let config = Config::parse(&data).unwrap();
+        assert_eq!(config.default_profile().name, "work");
+    }
+
+    #[test]
+    fn parse_fails_when_several_profiles_are_default() {
+        let data = VALID
+            .replace(
+                "  - name: personal\n",
+                "  - name: personal\n    default: true\n",
+            )
+            .replace("  - name: work\n", "  - name: work\n    default: true\n");
+        assert_eq!(
+            parse_err(&data),
+            "more than one profile is marked as default: personal, work"
+        );
     }
 
     #[test]

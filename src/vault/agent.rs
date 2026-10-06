@@ -77,6 +77,43 @@ impl KeyAgent for Agent {
     }
 }
 
+/// Returns the number of seconds in an ssh-agent `lifetime`, in the format `ssh-add -t`
+/// takes: a number of seconds, or numbers with units such as `1h30m` (s, m, h, d, w).
+pub fn lifetime_seconds(lifetime: &str) -> Result<u64> {
+    if lifetime.is_empty() {
+        bail!("empty SSH key expiration time");
+    }
+    if let Ok(seconds) = lifetime.parse::<u64>() {
+        return Ok(seconds);
+    }
+
+    let mut total = 0u64;
+    let mut number = String::new();
+    for c in lifetime.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        let unit = match c.to_ascii_lowercase() {
+            's' => 1,
+            'm' => 60,
+            'h' => 60 * 60,
+            'd' => 24 * 60 * 60,
+            'w' => 7 * 24 * 60 * 60,
+            _ => bail!("invalid SSH key expiration time: {lifetime}"),
+        };
+        let value: u64 = number
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid SSH key expiration time: {lifetime}"))?;
+        total += value * unit;
+        number.clear();
+    }
+    if !number.is_empty() {
+        bail!("invalid SSH key expiration time: {lifetime}");
+    }
+    Ok(total)
+}
+
 /// Returns the SHA256 fingerprint of an OpenSSH private key, as printed by `ssh-add -l`.
 pub fn fingerprint(key: &str) -> Result<String> {
     let key = ssh_key::PrivateKey::from_openssh(key).context("invalid OpenSSH private key")?;
@@ -126,6 +163,18 @@ mod tests {
             .fingerprints()
             .unwrap()
             .contains(&fingerprint(&TEST_KEY).unwrap()));
+    }
+
+    #[test]
+    fn lifetime_seconds_parses_ssh_add_formats() {
+        assert_eq!(lifetime_seconds("3600").unwrap(), 3600);
+        assert_eq!(lifetime_seconds("1h").unwrap(), 3600);
+        assert_eq!(lifetime_seconds("1h30m").unwrap(), 5400);
+        assert_eq!(lifetime_seconds("2d").unwrap(), 172_800);
+        assert_eq!(lifetime_seconds("1W").unwrap(), 604_800);
+        for invalid in ["", "h", "1x", "1h30"] {
+            assert!(lifetime_seconds(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

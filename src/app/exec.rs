@@ -3,9 +3,9 @@ use crate::log::{info, warn};
 use crate::vault::*;
 use anyhow::{bail, Context, Result};
 use clap::{builder::PossibleValuesParser, CommandFactory};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// Fails when any secret failed to load. The warnings were already printed.
@@ -102,7 +102,7 @@ impl LoadCommand {
     /// Execute the LoadCommand with the provided arguments.
     pub fn execute(&mut self, args: &LoadCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
-        let account = config.profile(&args.profile)?;
+        let account = config.resolve(args.profile.as_deref())?;
         let secrets: Vec<&Secret> = if args.names.is_empty() {
             account.secrets.iter().collect()
         } else {
@@ -156,6 +156,9 @@ impl LoadCommand {
             }
         };
 
+        let lifetime = lifetime_seconds(&args.expiration).ok();
+        let now = unix_now();
+        let mut records = Vec::new();
         let (mut added, mut kept, mut failed) = (0, 0, 0);
         for key in keys {
             match self.loader.add_key(
@@ -166,8 +169,18 @@ impl LoadCommand {
                 &args.expiration,
                 args.refresh,
             ) {
-                Ok(true) => added += 1,
-                Ok(false) => kept += 1,
+                Ok(KeyOutcome::Added(fingerprint)) => {
+                    added += 1;
+                    if let (Some(fingerprint), Some(lifetime)) = (fingerprint, lifetime) {
+                        records.push(KeyRecord {
+                            profile: account.name.clone(),
+                            name: key.name.clone(),
+                            fingerprint,
+                            expires: now + lifetime,
+                        });
+                    }
+                }
+                Ok(KeyOutcome::Present) => kept += 1,
                 Err(err) => {
                     warn(format!("failed to load SSH key '{}': {err:#}", key.name));
                     failed += 1;
@@ -186,6 +199,13 @@ impl LoadCommand {
                 "{kept} SSH key(s) already in the agent (use --refresh to reset their expiration)"
             ));
         }
+
+        // Remember when the keys expire, for `keysafe status`
+        if !records.is_empty() {
+            if let Err(err) = self.loader.cache.record_keys(&records, now) {
+                warn(format!("{err:#}"));
+            }
+        }
         failed
     }
 }
@@ -202,7 +222,7 @@ impl ReadCommand {
     /// Execute the ReadCommand with the provided arguments.
     pub fn execute(&mut self, args: &ReadCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
-        let account = config.profile(&args.profile)?;
+        let account = config.resolve(args.profile.as_deref())?;
         let secret = account.secret(&args.name)?;
         if secret.kind == SecretKind::Ssh {
             bail!(
@@ -233,7 +253,7 @@ impl ExportCommand {
         let accounts = if args.all {
             config.profiles.iter().collect()
         } else {
-            vec![config.profile(&args.profile)?]
+            vec![config.resolve(args.profile.as_deref())?]
         };
         let runtime = RuntimeDir::new(args.output.runtime_dir.clone());
 
@@ -378,7 +398,7 @@ impl ExecCommand {
     /// Execute the ExecCommand with the provided arguments.
     pub fn execute(&mut self, args: &ExecCommandArgs) -> Result<ExitStatus> {
         let config = Config::read_from_file(&args.parent.config)?;
-        let account = config.profile(&args.profile)?;
+        let account = config.resolve(args.profile.as_deref())?;
 
         // File secrets live only as long as the command
         let dir = tempfile::Builder::new()
@@ -440,6 +460,140 @@ impl Drop for SignalGuard {
     }
 }
 
+/// Returns the current time in seconds since the Unix epoch.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// Formats a number of seconds as a short duration, like `1h 5m`.
+fn duration(seconds: u64) -> String {
+    let (days, hours, minutes) = (seconds / 86_400, seconds / 3600 % 24, seconds / 60 % 60);
+    match (days, hours, minutes) {
+        (0, 0, 0) => format!("{seconds}s"),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
+/// Show what keysafe has going: secrets in this shell, SSH keys in the agent, and the
+/// profiles exported in new shells.
+pub struct StatusCommand {
+    /// Writer used to output the status.
+    pub writer: Box<dyn Write>,
+    /// Cache used to tell which profiles are exported and which SSH keys were added.
+    pub cache: Cache,
+    /// Agent the SSH keys were added to.
+    pub agent: Box<dyn KeyAgent>,
+    /// Environment of the shell keysafe runs in.
+    pub environment: HashMap<String, String>,
+    /// Current time, in seconds since the Unix epoch.
+    pub now: u64,
+}
+
+impl StatusCommand {
+    /// Execute the StatusCommand with the provided arguments.
+    pub fn execute(&mut self, args: &StatusCommandArgs) -> Result<()> {
+        let config = Config::read_from_file(&args.parent.config)?;
+        let profiles = match &args.profile {
+            Some(name) => vec![config.profile(name)?],
+            None => config.profiles.iter().collect(),
+        };
+
+        match args.shell {
+            Some(shell) => writeln!(self.writer, "Shell integration: active ({shell})")?,
+            None => writeln!(
+                self.writer,
+                "Shell integration: not active (add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `init bash` to ~/.bashrc)"
+            )?,
+        }
+        writeln!(self.writer, "Config: {}", args.parent.config.display())?;
+
+        // Only ask the agent if a profile has SSH keys
+        let has_keys = profiles
+            .iter()
+            .any(|p| p.secrets.iter().any(|s| s.kind == SecretKind::Ssh));
+        let present = if has_keys {
+            self.agent.fingerprints().ok()
+        } else {
+            None
+        };
+        let records = self.cache.keys()?;
+
+        for profile in profiles {
+            writeln!(self.writer)?;
+            let default = if profile.name == config.default_profile().name {
+                " (default)"
+            } else {
+                ""
+            };
+            writeln!(self.writer, "Profile: {}{default}", profile.name)?;
+            let exported = self.cache.loaded(&profile.name)?.is_some();
+            writeln!(
+                self.writer,
+                "  Exported in new shells: {}",
+                if exported { "yes" } else { "no" }
+            )?;
+
+            let width = profile
+                .secrets
+                .iter()
+                .map(|s| s.name.len())
+                .max()
+                .unwrap_or(0);
+            let variables: Vec<&Secret> =
+                profile.secrets.iter().filter(|s| s.is_variable()).collect();
+            if !variables.is_empty() {
+                writeln!(self.writer, "  Variables in this shell:")?;
+                for secret in variables {
+                    let state = match self.environment.get(&secret.name) {
+                        Some(value) if !value.is_empty() => match secret.kind {
+                            SecretKind::File if Path::new(value).exists() => "set (file)",
+                            SecretKind::File => "set, but the file is missing",
+                            _ => "set",
+                        },
+                        _ => "not set",
+                    };
+                    writeln!(self.writer, "    {:<width$}  {state}", secret.name)?;
+                }
+            }
+
+            let keys: Vec<&Secret> = profile
+                .secrets
+                .iter()
+                .filter(|s| s.kind == SecretKind::Ssh)
+                .collect();
+            if !keys.is_empty() {
+                writeln!(self.writer, "  SSH keys:")?;
+                for key in keys {
+                    let state = match &present {
+                        None => "SSH agent not running".to_string(),
+                        Some(present) => records
+                            .iter()
+                            .filter(|r| r.profile == profile.name && r.name == key.name)
+                            .find(|r| present.contains(&r.fingerprint))
+                            .map(|r| match r.expires.checked_sub(self.now) {
+                                Some(left) if left > 0 => {
+                                    format!("in agent, expires in {}", duration(left))
+                                }
+                                _ => "in agent".to_string(),
+                            })
+                            .unwrap_or_else(|| "not in agent".to_string()),
+                    };
+                    writeln!(self.writer, "    {:<width$}  {state}", key.name)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// List the profile names, one per line.
 pub struct ProfileListCommand {
     /// Writer used to output the names.
@@ -480,7 +634,12 @@ impl ProfileShowCommand {
                 writeln!(self.writer)?;
             }
             let loaded = self.cache.loaded(&account.name)?.is_some();
-            writeln!(self.writer, "Profile: {}", account.name)?;
+            let default = if account.name == config.default_profile().name {
+                " (default)"
+            } else {
+                ""
+            };
+            writeln!(self.writer, "Profile: {}{default}", account.name)?;
             match &account.provider {
                 Provider::OnePassword {
                     account: Some(name),
@@ -489,7 +648,7 @@ impl ProfileShowCommand {
             }
             writeln!(
                 self.writer,
-                "  Loaded: {}",
+                "  Exported in new shells: {}",
                 if loaded { "yes" } else { "no" }
             )?;
             if !account.secrets.is_empty() {
@@ -683,7 +842,7 @@ mod tests {
         LoadCommandArgs {
             parent: fixture.parent(),
             names: names.iter().map(|n| n.to_string()).collect(),
-            profile: "personal".into(),
+            profile: Some("personal".into()),
             expiration: "1h".into(),
             refresh,
             output: fixture.output(ExportFormat::Zsh),
@@ -694,7 +853,7 @@ mod tests {
         ReadCommandArgs {
             parent: fixture.parent(),
             name: name.into(),
-            profile: "personal".into(),
+            profile: Some("personal".into()),
             refresh: false,
         }
     }
@@ -702,7 +861,7 @@ mod tests {
     fn export_args(fixture: &Fixture, all: bool, cached: bool) -> ExportCommandArgs {
         ExportCommandArgs {
             parent: fixture.parent(),
-            profile: "personal".into(),
+            profile: Some("personal".into()),
             all,
             cached,
             refresh: false,
@@ -778,9 +937,9 @@ mod tests {
         })?;
 
         let expected = indoc! {"
-            Profile: personal
+            Profile: personal (default)
               Provider: 1password (my.1password.com)
-              Loaded: yes
+              Exported in new shells: yes
               Secrets:
                 env  GITHUB_TOKEN (op://Personal/GitHub/token)
                 file GCP_CREDENTIALS (op://Personal/GCP/credentials)
@@ -788,7 +947,7 @@ mod tests {
 
             Profile: work
               Provider: 1password (team.1password.com)
-              Loaded: no
+              Exported in new shells: no
               Secrets:
                 env  API_KEY (op://Infra/Prod/API_KEY)
         "};
@@ -1169,7 +1328,7 @@ mod tests {
         };
 
         cmd.execute(&ExportCommandArgs {
-            profile: "work".into(),
+            profile: Some("work".into()),
             output: fixture.output(ExportFormat::Json),
             ..export_args(&fixture, false, false)
         })?;
@@ -1193,7 +1352,7 @@ mod tests {
 
         let status = cmd.execute(&ExecCommandArgs {
             parent: fixture.parent(),
-            profile: "personal".into(),
+            profile: Some("personal".into()),
             refresh: false,
             command: vec![
                 "sh".into(),
@@ -1221,7 +1380,7 @@ mod tests {
 
         let status = cmd.execute(&ExecCommandArgs {
             parent: fixture.parent(),
-            profile: "personal".into(),
+            profile: Some("personal".into()),
             refresh: false,
             command: vec!["sh".into(), "-c".into(), "exit 3".into()],
         })?;
@@ -1244,7 +1403,7 @@ mod tests {
 
         let result = cmd.execute(&ExecCommandArgs {
             parent: fixture.parent(),
-            profile: "personal".into(),
+            profile: Some("personal".into()),
             refresh: false,
             command: vec!["touch".into(), marker.to_string_lossy().into_owned()],
         });
@@ -1431,6 +1590,160 @@ mod tests {
         let dir = assigned_runtime_dir(&output).unwrap();
         assert!(dir.join("files/personal/GCP_CREDENTIALS").exists());
         std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn load_uses_the_default_profile() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "GITHUB_TOKEN", "brown-fox");
+        let writer = Writer::new();
+        let mut cmd = LoadCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            agent: Box::new(MockKeyAgent::new()),
+        };
+
+        cmd.execute(&LoadCommandArgs {
+            profile: None,
+            ..load_args(&fixture, &["GITHUB_TOKEN"], false)
+        })?;
+
+        assert_eq!(writer.contents(), "export GITHUB_TOKEN='brown-fox'\n");
+        Ok(())
+    }
+
+    #[test]
+    fn load_records_the_keys_it_adds() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "my-key", &TEST_KEY);
+        let mut agent = agent(vec![]);
+        agent.expect_add().times(1).returning(|_, _| Ok(()));
+        let mut cmd = LoadCommand {
+            writer: Box::new(Writer::new()),
+            loader: fixture.loader(offline()),
+            agent: Box::new(agent),
+        };
+        let before = unix_now();
+
+        cmd.execute(&load_args(&fixture, &["my-key"], false))?;
+
+        let keys = fixture.cache().keys()?;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            (keys[0].profile.as_str(), keys[0].name.as_str()),
+            ("personal", "my-key")
+        );
+        assert_eq!(keys[0].fingerprint, fingerprint(&TEST_KEY)?);
+        assert!((before + 3600..=unix_now() + 3600).contains(&keys[0].expires));
+        Ok(())
+    }
+
+    #[test]
+    fn duration_is_short_and_readable() {
+        assert_eq!(duration(42), "42s");
+        assert_eq!(duration(45 * 60), "45m");
+        assert_eq!(duration(3600), "1h");
+        assert_eq!(duration(3600 + 5 * 60), "1h 5m");
+        assert_eq!(duration(2 * 86_400 + 3 * 3600 + 59), "2d 3h");
+    }
+
+    fn status(
+        fixture: &Fixture,
+        agent: MockKeyAgent,
+        environment: &[(&str, &str)],
+    ) -> StatusCommand {
+        StatusCommand {
+            writer: Box::new(Writer::new()),
+            cache: fixture.cache(),
+            agent: Box::new(agent),
+            environment: environment
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            now: 1_000,
+        }
+    }
+
+    #[test]
+    fn status_shows_variables_keys_and_exported_profiles() -> Result<()> {
+        let fixture = Fixture::new().loaded("personal", "env:GITHUB_TOKEN\n");
+        let key = fingerprint(&TEST_KEY)?;
+        fixture.cache().record_keys(
+            &[KeyRecord {
+                profile: "personal".into(),
+                name: "my-key".into(),
+                fingerprint: key.clone(),
+                expires: 1_000 + 45 * 60,
+            }],
+            1_000,
+        )?;
+        let gcp = fixture.dir.path().join("gcp.json");
+        std::fs::write(&gcp, "{}")?;
+        let writer = Writer::new();
+        let mut cmd = StatusCommand {
+            writer: Box::new(writer.clone()),
+            ..status(
+                &fixture,
+                agent(vec![key]),
+                &[
+                    ("GITHUB_TOKEN", "x"),
+                    ("GCP_CREDENTIALS", &gcp.to_string_lossy()),
+                ],
+            )
+        };
+
+        cmd.execute(&StatusCommandArgs {
+            parent: fixture.parent(),
+            profile: None,
+            shell: Some(Shell::Zsh),
+        })?;
+
+        let expected = format!(
+            indoc! {"
+                Shell integration: active (zsh)
+                Config: {}
+
+                Profile: personal (default)
+                  Exported in new shells: yes
+                  Variables in this shell:
+                    GITHUB_TOKEN     set
+                    GCP_CREDENTIALS  set (file)
+                  SSH keys:
+                    my-key           in agent, expires in 45m
+
+                Profile: work
+                  Exported in new shells: no
+                  Variables in this shell:
+                    API_KEY  not set
+            "},
+            fixture.parent().config.display()
+        );
+        assert_eq!(writer.contents(), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn status_reports_missing_agent_and_inactive_integration() -> Result<()> {
+        let fixture = Fixture::new();
+        let mut agent = MockKeyAgent::new();
+        agent
+            .expect_fingerprints()
+            .returning(|| Err(anyhow::anyhow!("SSH agent is not running")));
+        let writer = Writer::new();
+        let mut cmd = StatusCommand {
+            writer: Box::new(writer.clone()),
+            ..status(&fixture, agent, &[])
+        };
+
+        cmd.execute(&StatusCommandArgs {
+            parent: fixture.parent(),
+            profile: Some("personal".into()),
+            shell: None,
+        })?;
+
+        let output = writer.contents();
+        assert!(output.starts_with("Shell integration: not active"));
+        assert!(output.contains("    my-key           SSH agent not running\n"));
+        assert!(!output.contains("Profile: work"));
         Ok(())
     }
 
