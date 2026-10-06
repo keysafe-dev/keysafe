@@ -25,13 +25,13 @@ fn workspace(config: &str) -> tempfile::TempDir {
     dir
 }
 
-/// Returns a secret-env command that uses the config and cache of `dir`.
-fn secret_env(dir: &Path) -> assert_cmd::Command {
+/// Returns a keysafe command that uses the config and cache of `dir`.
+fn keysafe(dir: &Path) -> assert_cmd::Command {
     let mut cmd = cargo_bin_cmd!();
-    cmd.env_remove("SECRET_ENV_DEFAULT_PROFILE")
+    cmd.env_remove("KEYSAFE_DEFAULT_PROFILE")
         .env("HOME", dir)
-        .env("SECRET_ENV_CONFIG_FILE", dir.join("config.yml"))
-        .env("SECRET_ENV_STATE_DIR", dir.join("cache"));
+        .env("KEYSAFE_CONFIG_FILE", dir.join("config.yml"))
+        .env("KEYSAFE_STATE_DIR", dir.join("cache"));
     cmd
 }
 
@@ -50,7 +50,7 @@ fn help_lists_subcommands() {
 #[test]
 fn profile_list_prints_profiles() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path())
+    keysafe(dir.path())
         .args(["profile", "list"])
         .assert()
         .success()
@@ -60,8 +60,8 @@ fn profile_list_prints_profiles() {
 #[test]
 fn profile_show_with_config_flag() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path())
-        .env_remove("SECRET_ENV_CONFIG_FILE")
+    keysafe(dir.path())
+        .env_remove("KEYSAFE_CONFIG_FILE")
         .args(["profile", "show", "work", "--config"])
         .arg(dir.path().join("config.yml"))
         .assert()
@@ -72,19 +72,19 @@ fn profile_show_with_config_flag() {
 #[test]
 fn profile_show_fails_when_config_missing() {
     let dir = tempfile::tempdir().unwrap();
-    secret_env(dir.path())
+    keysafe(dir.path())
         .args(["profile", "show"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "secret-env: error: failed to read config file",
+            "keysafe: error: failed to read config file",
         ));
 }
 
 #[test]
 fn profile_show_fails_on_invalid_config() {
     let dir = workspace(&CONFIG.replace("kind: env", "kind: token"));
-    secret_env(dir.path())
+    keysafe(dir.path())
         .args(["profile", "show"])
         .assert()
         .failure()
@@ -96,7 +96,7 @@ fn profile_show_fails_on_invalid_config() {
 #[test]
 fn export_cached_writes_nothing_before_any_profile_is_loaded() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path())
+    keysafe(dir.path())
         .args(["export", "--all", "--cached", "--format", "zsh"])
         .assert()
         .success()
@@ -106,7 +106,7 @@ fn export_cached_writes_nothing_before_any_profile_is_loaded() {
 #[test]
 fn export_rejects_cached_with_refresh() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path())
+    keysafe(dir.path())
         .args(["export", "--cached", "--refresh"])
         .assert()
         .failure()
@@ -116,7 +116,7 @@ fn export_rejects_cached_with_refresh() {
 #[test]
 fn read_fails_for_unknown_profile() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path())
+    keysafe(dir.path())
         .args(["read", "-p", "staging", "GITHUB_TOKEN"])
         .assert()
         .failure()
@@ -128,22 +128,22 @@ fn read_fails_for_unknown_profile() {
 #[test]
 fn load_uses_default_profile_from_environment() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path())
-        .env("SECRET_ENV_DEFAULT_PROFILE", "staging")
+    keysafe(dir.path())
+        .env("KEYSAFE_DEFAULT_PROFILE", "staging")
         .arg("load")
         .assert()
         .failure()
         .stderr(predicate::str::contains("profile 'staging' not found"));
 }
 
-/// Returns a secret-env command with `dir` as home and no location set explicitly, so the
+/// Returns a keysafe command with `dir` as home and no location set explicitly, so the
 /// default locations apply.
-fn secret_env_defaults(dir: &Path) -> assert_cmd::Command {
+fn keysafe_defaults(dir: &Path) -> assert_cmd::Command {
     let mut cmd = cargo_bin_cmd!();
     for var in [
-        "SECRET_ENV_CONFIG_FILE",
-        "SECRET_ENV_STATE_DIR",
-        "SECRET_ENV_DEFAULT_PROFILE",
+        "KEYSAFE_CONFIG_FILE",
+        "KEYSAFE_STATE_DIR",
+        "KEYSAFE_DEFAULT_PROFILE",
         "XDG_CONFIG_HOME",
         "XDG_STATE_HOME",
     ] {
@@ -156,11 +156,11 @@ fn secret_env_defaults(dir: &Path) -> assert_cmd::Command {
 #[test]
 fn default_config_follows_xdg_config_home() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("xdg/secret-env/config.yml");
+    let config = dir.path().join("xdg/keysafe/config.yml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, CONFIG).unwrap();
 
-    secret_env_defaults(dir.path())
+    keysafe_defaults(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join("xdg"))
         .args(["profile", "list"])
         .assert()
@@ -175,7 +175,7 @@ fn default_config_falls_back_to_the_legacy_location() {
     std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
     std::fs::write(&legacy, CONFIG).unwrap();
 
-    secret_env_defaults(dir.path())
+    keysafe_defaults(dir.path())
         .args(["profile", "list"])
         .assert()
         .success()
@@ -183,11 +183,11 @@ fn default_config_falls_back_to_the_legacy_location() {
         .stderr(predicate::str::contains(format!(
             "using {}; move it to {}",
             legacy.display(),
-            dir.path().join(".config/secret-env/config.yml").display()
+            dir.path().join(".config/keysafe/config.yml").display()
         )));
 
     // The hint is left out of `init`, which runs on every shell start
-    secret_env_defaults(dir.path())
+    keysafe_defaults(dir.path())
         .args(["init", "zsh"])
         .assert()
         .success()
@@ -202,14 +202,14 @@ fn default_config_prefers_the_new_location() {
             ".config/op/config.yml",
             CONFIG.replace("name: work", "name: legacy"),
         ),
-        (".config/secret-env/config.yml", CONFIG.to_string()),
+        (".config/keysafe/config.yml", CONFIG.to_string()),
     ] {
         let path = dir.path().join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, config).unwrap();
     }
 
-    secret_env_defaults(dir.path())
+    keysafe_defaults(dir.path())
         .args(["profile", "list"])
         .assert()
         .success()
@@ -220,13 +220,13 @@ fn default_config_prefers_the_new_location() {
 #[test]
 fn profile_show_reads_legacy_state() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join(".config/secret-env/config.yml");
+    let config = dir.path().join(".config/keysafe/config.yml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, CONFIG).unwrap();
     std::fs::create_dir_all(dir.path().join(".cache/op")).unwrap();
     std::fs::write(dir.path().join(".cache/op/work.metadata"), "env:API_KEY\n").unwrap();
 
-    secret_env_defaults(dir.path())
+    keysafe_defaults(dir.path())
         .args(["profile", "show", "work"])
         .assert()
         .success()
@@ -236,7 +236,7 @@ fn profile_show_reads_legacy_state() {
 #[test]
 fn exec_requires_a_command() {
     let dir = workspace(CONFIG);
-    secret_env(dir.path()).arg("exec").assert().failure();
+    keysafe(dir.path()).arg("exec").assert().failure();
 }
 
 /// Runs `script` in a clean `shell` (zsh or bash) whose home, config and cache are in `dir`,
@@ -249,21 +249,21 @@ fn run_shell(shell: &str, dir: &Path, script: &str) -> std::process::Output {
     std::process::Command::new(shell)
         .args(flags)
         .arg(script)
-        .env_remove("SECRET_ENV_DEFAULT_PROFILE")
+        .env_remove("KEYSAFE_DEFAULT_PROFILE")
         .env("HOME", dir)
-        .env("SECRET_ENV_CONFIG_FILE", dir.join("config.yml"))
-        .env("SECRET_ENV_STATE_DIR", dir.join("cache"))
+        .env("KEYSAFE_CONFIG_FILE", dir.join("config.yml"))
+        .env("KEYSAFE_STATE_DIR", dir.join("cache"))
         .output()
         .unwrap()
 }
 
 /// Returns the statement that sets up the shell integration for `shell`.
 fn init(shell: &str) -> String {
-    let bin = env!("CARGO_BIN_EXE_secret-env");
+    let bin = env!("CARGO_BIN_EXE_keysafe");
     format!("eval \"$('{bin}' init {shell})\"")
 }
 
-/// Runs `script` in a clean `shell` after `eval "$(secret-env init <shell>)"`.
+/// Runs `script` in a clean `shell` after `eval "$(keysafe init <shell>)"`.
 fn with_init(shell: &str, dir: &Path, script: &str) -> std::process::Output {
     run_shell(shell, dir, &format!("{}\n{script}", init(shell)))
 }
@@ -273,11 +273,11 @@ fn stdout(output: &std::process::Output) -> String {
 }
 
 /// Writes a stand-in for the binary that sends `statements` to fd 3, prints `raw` to stdout and
-/// exits with `code`, the way secret-env does under the shell integration.
+/// exits with `code`, the way keysafe does under the shell integration.
 fn stub(dir: &Path, statements: &str, raw: &str, code: i32) -> String {
     let path = dir.join("stub");
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$SECRET_ENV_EVAL\" > '{}'\nprintf '%s\\n' '{statements}' >&3\n[ -z '{raw}' ] || printf '%s\\n' '{raw}'\nexit {code}\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$KEYSAFE_EVAL\" > '{}'\nprintf '%s\\n' '{statements}' >&3\n[ -z '{raw}' ] || printf '%s\\n' '{raw}'\nexit {code}\n",
         dir.join("eval").display()
     );
     std::fs::write(&path, script).unwrap();
@@ -293,10 +293,7 @@ fn init_scripts_are_valid_shell() {
         if interpreter.starts_with('/') && !Path::new(interpreter).exists() {
             continue;
         }
-        let script = secret_env(dir.path())
-            .args(["init", shell])
-            .output()
-            .unwrap();
+        let script = keysafe(dir.path()).args(["init", shell]).output().unwrap();
         assert!(script.status.success());
         let flag = if shell == "zsh" { "-fn" } else { "-n" };
         let status = std::process::Command::new(interpreter)
@@ -312,7 +309,7 @@ fn init_scripts_are_valid_shell() {
 fn init_function_passes_other_commands_through() {
     let dir = workspace(CONFIG);
     for shell in ["zsh", "bash"] {
-        let output = with_init(shell, dir.path(), "secret-env profile list");
+        let output = with_init(shell, dir.path(), "keysafe profile list");
         assert_eq!(stdout(&output), "personal\nwork\n", "{shell}");
     }
 }
@@ -324,7 +321,7 @@ fn init_function_prints_explicit_formats_instead_of_evaluating_them() {
         let output = with_init(
             shell,
             dir.path(),
-            "secret-env export --all --cached --format json",
+            "keysafe export --all --cached --format json",
         );
         assert_eq!(stdout(&output), "{}\n", "{shell}");
     }
@@ -334,11 +331,7 @@ fn init_function_prints_explicit_formats_instead_of_evaluating_them() {
 fn init_function_returns_the_exit_status() {
     let dir = workspace(CONFIG);
     for shell in ["zsh", "bash"] {
-        let output = with_init(
-            shell,
-            dir.path(),
-            "secret-env load -p staging; echo \"rc=$?\"",
-        );
+        let output = with_init(shell, dir.path(), "keysafe load -p staging; echo \"rc=$?\"");
         assert_eq!(stdout(&output), "rc=1\n", "{shell}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("profile 'staging' not found"));
     }
@@ -350,7 +343,7 @@ fn init_function_evaluates_fd3_and_prints_stdout() {
     let stub = stub(dir.path(), "export ROUTED=yes", "raw output", 3);
     for shell in ["zsh", "bash"] {
         let script =
-            format!("_SECRET_ENV_BIN='{stub}'\nsecret-env load A; echo \"rc=$? ROUTED=$ROUTED\"");
+            format!("_KEYSAFE_BIN='{stub}'\nkeysafe load A; echo \"rc=$? ROUTED=$ROUTED\"");
         let output = with_init(shell, dir.path(), &script);
         assert_eq!(stdout(&output), "raw output\nrc=3 ROUTED=yes\n", "{shell}");
         let eval = std::fs::read_to_string(dir.path().join("eval")).unwrap();
@@ -365,11 +358,11 @@ fn init_removes_the_runtime_directory_on_exit() {
         let runtime = dir.path().join(format!("runtime-{shell}"));
         std::fs::create_dir(&runtime).unwrap();
         let assign = match shell {
-            "zsh" => format!("typeset -g _SECRET_ENV_RUNTIME_DIR={}", runtime.display()),
-            _ => format!("_SECRET_ENV_RUNTIME_DIR={}", runtime.display()),
+            "zsh" => format!("typeset -g _KEYSAFE_RUNTIME_DIR={}", runtime.display()),
+            _ => format!("_KEYSAFE_RUNTIME_DIR={}", runtime.display()),
         };
         let stub = stub(dir.path(), &assign, "", 0);
-        let script = format!("_SECRET_ENV_BIN='{stub}'\nsecret-env export\n[ -d \"$_SECRET_ENV_RUNTIME_DIR\" ] && echo tracked");
+        let script = format!("_KEYSAFE_BIN='{stub}'\nkeysafe export\n[ -d \"$_KEYSAFE_RUNTIME_DIR\" ] && echo tracked");
         let output = with_init(shell, dir.path(), &script);
         assert_eq!(stdout(&output), "tracked\n", "{shell}");
         assert!(
@@ -382,7 +375,7 @@ fn init_removes_the_runtime_directory_on_exit() {
 #[test]
 fn init_registers_zsh_completions_before_and_after_compinit() {
     let dir = workspace(CONFIG);
-    let check = "print -r -- \"${_comps[secret-env]:-none}\"";
+    let check = "print -r -- \"${_comps[keysafe]:-none}\"";
     let compinit = format!(
         "autoload -Uz compinit; compinit -u -d '{}'",
         dir.path().join("zcd").display()
@@ -391,24 +384,23 @@ fn init_registers_zsh_completions_before_and_after_compinit() {
     // compinit already ran: registered right away
     let script = format!("{compinit}\n{}\n{check}", init("zsh"));
     let output = run_shell("zsh", dir.path(), &script);
-    assert_eq!(stdout(&output), "_secret-env\n");
+    assert_eq!(stdout(&output), "_keysafe\n");
 
     // compinit runs later in ~/.zshrc: registered before the first prompt
     let script = format!("{check}\n{compinit}\nfor f in $precmd_functions; do $f; done\n{check}");
     let output = with_init("zsh", dir.path(), &script);
-    assert_eq!(stdout(&output), "none\n_secret-env\n");
+    assert_eq!(stdout(&output), "none\n_keysafe\n");
 }
 
 #[test]
 fn init_registers_bash_completions() {
     let dir = workspace(CONFIG);
-    let script =
-        "if type complete >/dev/null 2>&1; then complete -p secret-env; else echo none; fi";
+    let script = "if type complete >/dev/null 2>&1; then complete -p keysafe; else echo none; fi";
     let output = with_init("bash", dir.path(), script);
     // A bash without readline has no `complete`: the integration must load without errors
     match stdout(&output).as_str() {
         "none\n" => assert_eq!(String::from_utf8_lossy(&output.stderr), ""),
-        registered => assert!(registered.contains("-F _secret__env"), "{registered}"),
+        registered => assert!(registered.contains("-F _keysafe"), "{registered}"),
     }
 }
 
@@ -423,6 +415,6 @@ fn init_keeps_an_existing_bash_exit_trap() {
     let output = run_shell("bash", dir.path(), &script);
     assert_eq!(
         stdout(&output),
-        "trap -- '_secret_env_cleanup; echo previous trap' EXIT\nprevious trap\n"
+        "trap -- '_keysafe_cleanup; echo previous trap' EXIT\nprevious trap\n"
     );
 }

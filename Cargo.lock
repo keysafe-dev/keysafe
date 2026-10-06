@@ -984,6 +984,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "keysafe"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "apple-native-keyring-store",
+ "assert_cmd",
+ "clap",
+ "clap_complete",
+ "indoc",
+ "keyring-core",
+ "libc",
+ "mockall",
+ "predicates",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "ssh-key",
+ "tempfile",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,28 +1517,6 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "secret-env"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "apple-native-keyring-store",
- "assert_cmd",
- "clap",
- "clap_complete",
- "indoc",
- "keyring-core",
- "libc",
- "mockall",
- "predicates",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "ssh-key",
- "tempfile",
- "zbus-secret-service-keyring-store",
 ]
 
 [[package]]

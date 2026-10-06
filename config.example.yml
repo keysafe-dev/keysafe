@@ -1,5 +1,5 @@
-# secret-env configuration file
-# Location: ~/.config/secret-env/config.yml
+# keysafe configuration file
+# Location: ~/.config/keysafe/config.yml
 #
 # This file defines your 1Password accounts and the secrets to load from them.
 # Each account can have multiple environment variables and SSH keys.
@@ -76,7 +76,7 @@ accounts:
 #
 # 1. Profile Names:
 #    - Use descriptive names like "personal", "work", "staging", etc.
-#    - These names are used with: secret-env load -p [profile]
+#    - These names are used with: keysafe load -p [profile]
 #
 # 2. Account URLs:
 #    - Must match your 1Password account URL exactly
@@ -108,21 +108,21 @@ accounts:
 # Usage Examples:
 #
 #   # Load all secrets for personal account
-#   secret-env load -p personal
+#   keysafe load -p personal
 #
 #   # Load all secrets for work account with 8h SSH key expiration
-#   secret-env load -p work -e 8h
+#   keysafe load -p work -e 8h
 #
 #   # Load individual environment variable
-#   secret-env load GITHUB_TOKEN   # Export to the current shell
-#   secret-env read GITHUB_TOKEN   # Print the value
+#   keysafe load GITHUB_TOKEN   # Export to the current shell
+#   keysafe read GITHUB_TOKEN   # Print the value
 #
 #   # Load individual file secret
-#   secret-env load GOOGLE_APPLICATION_CREDENTIALS  # Write the file and export its path
+#   keysafe load GOOGLE_APPLICATION_CREDENTIALS  # Write the file and export its path
 #
 #   # Load individual SSH key
-#   secret-env load github-work
-#   secret-env load github-work -e 4h  # With 4h expiration
+#   keysafe load github-work
+#   keysafe load github-work -e 4h  # With 4h expiration
 #
 #   # Load from specific profile
-#   secret-env load -p work MYAPP_API_KEY
+#   keysafe load -p work MYAPP_API_KEY

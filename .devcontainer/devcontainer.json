@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/devcontainers/spec/refs/heads/main/schemas/devContainer.base.schema.json",
-  "name": "secret-env",
+  "name": "keysafe",
   "image": "mcr.microsoft.com/devcontainers/base:bookworm",
   "workspaceFolder": "/home/vscode/workspace",
   "mounts": [

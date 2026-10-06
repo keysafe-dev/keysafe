@@ -88,11 +88,11 @@ impl SecretStore for Keychain {
 
 /// Cache keeps fetched secrets in a [`SecretStore`] and remembers which profiles were loaded.
 ///
-/// Secrets are stored under the service `secret-env.<profile>` with the secret name as the
+/// Secrets are stored under the service `keysafe.<profile>` with the secret name as the
 /// account. Loaded profiles are recorded in `<dir>/<profile>.metadata`, one `kind:name` line
 /// per secret, so they can be exported on shell startup without contacting 1Password.
 ///
-/// Secrets and metadata stored before secret-env had its own name (and by zsh-op) are still
+/// Secrets and metadata stored before keysafe had its own name (and by zsh-op) are still
 /// found: secrets under `op-secrets-<profile>` move to the new service when they are first
 /// read, and metadata is read from the legacy directory until the profile is loaded again.
 pub struct Cache {
@@ -100,7 +100,7 @@ pub struct Cache {
     pub store: Box<dyn SecretStore>,
     /// Directory holding the profile metadata files.
     pub dir: PathBuf,
-    /// Directory holding metadata files written before secret-env had its own name.
+    /// Directory holding metadata files written before keysafe had its own name.
     pub legacy_dir: Option<PathBuf>,
 }
 
@@ -114,7 +114,7 @@ impl Cache {
         }
     }
 
-    /// Also reads metadata files from `dir`, written before secret-env had its own name.
+    /// Also reads metadata files from `dir`, written before keysafe had its own name.
     pub fn with_legacy_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.legacy_dir = dir;
         self
@@ -122,10 +122,10 @@ impl Cache {
 
     /// Returns the store service name used for the secrets of `profile`.
     pub fn service(profile: &str) -> String {
-        format!("secret-env.{profile}")
+        format!("keysafe.{profile}")
     }
 
-    /// Returns the store service name used for the secrets of `profile` before secret-env had
+    /// Returns the store service name used for the secrets of `profile` before keysafe had
     /// its own name.
     pub fn legacy_service(profile: &str) -> String {
         format!("op-secrets-{profile}")
@@ -198,7 +198,7 @@ impl Cache {
             .with_context(|| format!("failed to create {}", self.dir.display()))?;
 
         let mut data = format!(
-            "# secret-env metadata for profile: {}\n# Format: kind:name\n\n",
+            "# keysafe metadata for profile: {}\n# Format: kind:name\n\n",
             account.name
         );
         for secret in &account.secrets {
@@ -316,7 +316,7 @@ mod tests {
     #[ignore = "writes to the real platform keychain"]
     fn keychain_round_trips_values() {
         let keychain = Keychain::new();
-        let (service, account) = ("secret-env-test", "ROUND_TRIP");
+        let (service, account) = ("keysafe-test", "ROUND_TRIP");
         let value = "multi\nline \\ \"quoted\" ✓";
 
         keychain.set(service, account, value).unwrap();
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn service_uses_profile_prefix() {
-        assert_eq!(Cache::service("work"), "secret-env.work");
+        assert_eq!(Cache::service("work"), "keysafe.work");
         assert_eq!(Cache::legacy_service("work"), "op-secrets-work");
     }
 
@@ -347,9 +347,7 @@ mod tests {
         );
 
         assert_eq!(
-            store
-                .value("secret-env.personal", "GITHUB_TOKEN")
-                .as_deref(),
+            store.value("keysafe.personal", "GITHUB_TOKEN").as_deref(),
             Some("brown-fox")
         );
         assert_eq!(store.value("op-secrets-personal", "GITHUB_TOKEN"), None);
@@ -383,9 +381,7 @@ mod tests {
         cache.set("personal", "GITHUB_TOKEN", "brown-fox").unwrap();
 
         assert_eq!(
-            store
-                .value("secret-env.personal", "GITHUB_TOKEN")
-                .as_deref(),
+            store.value("keysafe.personal", "GITHUB_TOKEN").as_deref(),
             Some("brown-fox")
         );
         assert_eq!(
@@ -437,11 +433,11 @@ mod tests {
     fn clear_deletes_configured_recorded_and_legacy_secrets() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::with(&[
-            ("secret-env.personal", "GITHUB_TOKEN", "a"),
+            ("keysafe.personal", "GITHUB_TOKEN", "a"),
             ("op-secrets-personal", "GITHUB_TOKEN", "a"),
-            ("secret-env.personal", "REMOVED", "b"),
+            ("keysafe.personal", "REMOVED", "b"),
             ("op-secrets-personal", "my-key", "c"),
-            ("secret-env.work", "GITHUB_TOKEN", "d"),
+            ("keysafe.work", "GITHUB_TOKEN", "d"),
         ]);
         let legacy = dir.path().join("op");
         std::fs::create_dir(&legacy).unwrap();
@@ -451,13 +447,13 @@ mod tests {
 
         assert_eq!(cache.clear(&account()).unwrap(), 3);
 
-        for service in ["secret-env.personal", "op-secrets-personal"] {
+        for service in ["keysafe.personal", "op-secrets-personal"] {
             for name in ["GITHUB_TOKEN", "REMOVED", "my-key"] {
                 assert_eq!(store.value(service, name), None);
             }
         }
         assert_eq!(
-            store.value("secret-env.work", "GITHUB_TOKEN").as_deref(),
+            store.value("keysafe.work", "GITHUB_TOKEN").as_deref(),
             Some("d")
         );
         assert_eq!(cache.loaded("personal").unwrap(), None);
