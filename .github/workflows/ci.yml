@@ -107,7 +107,7 @@ jobs:
             otool -L "$bin"
             ! otool -L "$bin" | grep -q /nix/store
           else
-            file "$bin" | grep -Eq 'static(-pie)? linked'
+            file "$bin" | grep -Eq 'static(ally|-pie)? linked'
           fi
           case "${{ matrix.target }}" in
             x86_64-apple-darwin) ;; # cross-compiled; the arm64 runner can't always run it
