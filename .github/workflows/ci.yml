@@ -64,15 +64,20 @@ jobs:
           target-branch: main
 
   build:
-    needs: release
-    if: ${{ needs.release.outputs.release_created }}
+    # Builds on every run, so a broken binary shows up before a release; uploads on releases.
+    needs: [test, release]
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.release.result != 'failure' }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            nix_system: x86_64-linux
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: macos-15
-            nix_system: aarch64-darwin
+            target: aarch64-apple-darwin
+          - os: macos-15
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -81,21 +86,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v23
+      # Plain cargo, not Nix: the binaries must not depend on /nix/store
+      - name: Install Rust
+        run: |
+          rustup show active-toolchain
+          rustup target add ${{ matrix.target }}
 
-      - name: Build with Nix
-        run: nix build . --system ${{ matrix.nix_system }}
+      - name: Install musl
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Check the binary runs on its own
+        run: |
+          bin=target/${{ matrix.target }}/release/keysafe
+          file "$bin"
+          if [ "$RUNNER_OS" = macOS ]; then
+            otool -L "$bin"
+            ! otool -L "$bin" | grep -q /nix/store
+          else
+            file "$bin" | grep -Eq 'static(-pie)? linked'
+          fi
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin) ;; # cross-compiled; the arm64 runner can't always run it
+            *) "$bin" --version ;;
+          esac
 
       - name: Prepare Release Assets
+        if: ${{ needs.release.outputs.release_created }}
         run: |
-          mkdir -p release && install -m 0755 result/bin/keysafe release/keysafe-${{ matrix.nix_system }}
+          mkdir -p release && install -m 0755 target/${{ matrix.target }}/release/keysafe release/keysafe-${{ matrix.target }}
 
       - name: Upload Release Assets
+        if: ${{ needs.release.outputs.release_created }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag_name }}
-          files: release/keysafe-${{ matrix.nix_system }}
+          files: release/keysafe-${{ matrix.target }}
 
   publish:
     needs: [release, build]

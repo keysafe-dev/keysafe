@@ -2,7 +2,7 @@
 
 > Your 1Password secrets in every shell: cached in the system keychain, exported as environment variables or files, and added to ssh-agent.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![CI](https://github.com/keysafe-dev/keysafe/actions/workflows/ci.yml/badge.svg)](https://github.com/keysafe-dev/keysafe/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/keysafe.svg)](https://crates.io/crates/keysafe) [![Downloads](https://img.shields.io/crates/d/keysafe.svg)](https://crates.io/crates/keysafe) [![CI](https://github.com/keysafe-dev/keysafe/actions/workflows/ci.yml/badge.svg)](https://github.com/keysafe-dev/keysafe/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `keysafe` is not another password manager: 1Password stays the source of truth. It reads a YAML config of profiles, fetches each secret from 1Password on first use, and caches it in the macOS Keychain or the Linux Secret Service. After that, secrets come from the keychain: your shell starts without waiting for 1Password or asking for Touch ID.
 
@@ -21,19 +21,32 @@ Add one line to your shell's startup file and `keysafe` sets up your secrets in 
 
 ## Installation
 
+**Cargo** (builds from [crates.io](https://crates.io/crates/keysafe)):
+
+```bash
+cargo install keysafe
+```
+
+**Prebuilt binary** with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), for macOS (Apple Silicon, Intel) and Linux (x86-64, arm64):
+
+```bash
+cargo binstall keysafe
+```
+
 **Nix:**
 
 ```bash
 nix profile install github:keysafe-dev/keysafe
 ```
 
-**Cargo:**
+**Download:** each [release](https://github.com/keysafe-dev/keysafe/releases/latest) has a binary per platform: `keysafe-aarch64-apple-darwin`, `keysafe-x86_64-apple-darwin`, `keysafe-x86_64-unknown-linux-musl` and `keysafe-aarch64-unknown-linux-musl`. The Linux binaries are static and run on any distribution.
 
 ```bash
-cargo install --git https://github.com/keysafe-dev/keysafe
+curl -fsSL --create-dirs -o ~/.local/bin/keysafe https://github.com/keysafe-dev/keysafe/releases/latest/download/keysafe-aarch64-apple-darwin
+chmod +x ~/.local/bin/keysafe
 ```
 
-**Prebuilt:** download `keysafe-<system>` from the [latest release](https://github.com/keysafe-dev/keysafe/releases/latest).
+Then set up your shell (see [Shell integration](#shell-integration)) and run `keysafe doctor` to check everything.
 
 ## Configuration
 
