@@ -96,7 +96,7 @@ pub fn default_state_dir() -> PathBuf {
 }
 
 /// Returns the config file used before keysafe had its own name.
-fn legacy_config() -> PathBuf {
+pub fn legacy_config() -> PathBuf {
     home_dir().join(".config/op/config.yml")
 }
 
@@ -165,12 +165,20 @@ pub enum ProgramCommand {
     )]
     Profile(ProfileCommandArgs),
 
+    /// Create, edit and locate the config file.
+    #[command(
+        name = "config",
+        about = "Create, edit and locate the config file.",
+        next_display_order = 8
+    )]
+    Config(ConfigCommandArgs),
+
     /// Print the shell integration script for zsh or bash.
     #[command(
         name = "init",
         about = "Print the shell integration script for zsh or bash.",
         long_about = "Print a script that defines the `keysafe` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `eval \"$(keysafe init bash)\"` to ~/.bashrc.",
-        next_display_order = 8
+        next_display_order = 9
     )]
     Init(InitCommandArgs),
 }
@@ -190,9 +198,45 @@ impl ProgramCommand {
                 ProfileCommand::Show(args) => &mut args.parent,
                 ProfileCommand::Clear(args) => &mut args.parent,
             },
+            Self::Config(args) => match &mut args.command {
+                ConfigCommand::Init(args) => &mut args.parent,
+                ConfigCommand::Edit(args) => &mut args.parent,
+                ConfigCommand::Path(args) => &mut args.parent,
+            },
             Self::Init(args) => &mut args.parent,
         }
     }
+}
+
+/// Subcommand of `config`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Create a starter config file.
+    #[command(
+        name = "init",
+        about = "Create a starter config file.",
+        long_about = "Write a commented starter config, with one profile and examples of each kind of secret, to the config path (see `keysafe config path`). An existing file is never replaced unless --force is given.",
+        next_display_order = 1
+    )]
+    Init(ConfigInitCommandArgs),
+
+    /// Open the config file in your editor, then check it.
+    #[command(
+        name = "edit",
+        about = "Open the config file in your editor, then check it.",
+        long_about = "Open the config file in $VISUAL or $EDITOR (vi if neither is set), and check that it is valid once the editor exits.",
+        next_display_order = 2
+    )]
+    Edit(ConfigEditCommandArgs),
+
+    /// Print the path of the config file in use.
+    #[command(
+        name = "path",
+        about = "Print the path of the config file in use.",
+        long_about = "Print the path of the config file keysafe uses, and say on stderr where it comes from: --config, KEYSAFE_CONFIG_FILE, the default location, or zsh-op's location.",
+        next_display_order = 3
+    )]
+    Path(ConfigPathCommandArgs),
 }
 
 /// Subcommand of `profile`.
@@ -443,6 +487,42 @@ pub struct StatusCommandArgs {
     /// Set by the script that `init` prints; not meant to be set by hand.
     #[arg(long, env = "KEYSAFE_SHELL", hide = true)]
     pub shell: Option<Shell>,
+}
+
+/// ConfigCommandArgs defines the arguments for the config subcommands.
+#[derive(Debug, Args)]
+pub struct ConfigCommandArgs {
+    /// Command specifies the config subcommand to execute.
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+/// ConfigInitCommandArgs defines the arguments for the ConfigInitCommand.
+#[derive(Debug, Args)]
+pub struct ConfigInitCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+
+    /// Replace an existing config file.
+    #[arg(help = "Replace an existing config file.", long, short)]
+    pub force: bool,
+}
+
+/// ConfigEditCommandArgs defines the arguments for the ConfigEditCommand.
+#[derive(Debug, Args)]
+pub struct ConfigEditCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+}
+
+/// ConfigPathCommandArgs defines the arguments for the ConfigPathCommand.
+#[derive(Debug, Args)]
+pub struct ConfigPathCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
 }
 
 /// ProfileCommandArgs defines the arguments for the profile subcommands.

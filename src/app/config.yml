@@ -1,0 +1,32 @@
+# keysafe configuration
+#
+# Each profile reads its secrets from a provider. `keysafe load` loads the
+# default profile: the one marked `default: true`, or the first one.
+#
+# Find a secret's reference in the 1Password app: right-click the item, then
+# "Copy Secret Reference". Add `?ssh-format=openssh` for SSH private keys.
+#
+# More: https://github.com/keysafe-dev/keysafe#configuration
+
+version: 1
+
+profiles:
+  - name: personal
+    provider:
+      type: 1password
+      # account: my.1password.com   # optional: the account to use (as in `op --account`)
+    secrets:
+      # An environment variable:
+      # - kind: env
+      #   name: GITHUB_TOKEN
+      #   path: op://Personal/GitHub/token
+      #
+      # A file, written to a private location; its path is exported:
+      # - kind: file
+      #   name: GOOGLE_APPLICATION_CREDENTIALS
+      #   path: op://Personal/GCP/service-account.json
+      #
+      # An SSH key, added to ssh-agent:
+      # - kind: ssh
+      #   name: github
+      #   path: op://Private/GitHub SSH/private key?ssh-format=openssh

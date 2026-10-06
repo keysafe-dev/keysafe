@@ -107,9 +107,11 @@ fn profile_show_fails_when_config_missing() {
         .args(["profile", "show"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "keysafe: error: failed to read config file",
-        ));
+        .stderr(
+            predicate::str::contains("keysafe: error: config file not found: ").and(
+                predicate::str::contains("(create one with `keysafe config init`)"),
+            ),
+        );
 }
 
 #[test]
@@ -197,6 +199,52 @@ fn default_config_follows_xdg_config_home() {
         .assert()
         .success()
         .stdout("personal\nwork\n");
+}
+
+#[test]
+fn config_init_creates_a_usable_config_at_the_default_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join(".config/keysafe/config.yml");
+
+    keysafe_defaults(dir.path())
+        .args(["config", "path"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", config.display()))
+        .stderr(predicate::str::contains("it does not exist yet"));
+
+    keysafe_defaults(dir.path())
+        .args(["config", "init"])
+        .assert()
+        .success();
+    keysafe_defaults(dir.path())
+        .args(["profile", "list"])
+        .assert()
+        .success()
+        .stdout("personal\n");
+
+    // A second init leaves the config alone
+    keysafe_defaults(dir.path())
+        .args(["config", "init"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn config_init_ignores_the_legacy_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".config/op/config.yml");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, CONFIG).unwrap();
+
+    keysafe_defaults(dir.path())
+        .args(["config", "init"])
+        .assert()
+        .success();
+
+    assert!(dir.path().join(".config/keysafe/config.yml").exists());
+    assert_eq!(std::fs::read_to_string(&legacy).unwrap(), CONFIG);
 }
 
 #[test]

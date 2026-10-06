@@ -37,7 +37,15 @@ cargo install --git https://github.com/keysafe-dev/keysafe
 
 ## Configuration
 
-Create `~/.config/keysafe/config.yml` (or `$XDG_CONFIG_HOME/keysafe/config.yml`):
+Create a starter config, then add your secrets:
+
+```bash
+keysafe config init    # writes ~/.config/keysafe/config.yml (or $XDG_CONFIG_HOME/keysafe/config.yml)
+keysafe config edit    # opens it in $VISUAL or $EDITOR, and checks it when you close the editor
+keysafe config path    # shows which config file is used, and why
+```
+
+A complete config looks like this:
 
 ```yaml
 version: 1
@@ -119,6 +127,7 @@ Commands:
   exec     Execute a command with the secrets of a profile in its environment.
   status   Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.
   profile  List, show and clear profiles.
+  config   Create, edit and locate the config file.
   init     Print the shell integration script for zsh or bash.
 ```
 
