@@ -1,5 +1,5 @@
 use crate::app::args::*;
-use crate::log::{info, warn};
+use crate::log::{count, info, styled, success, warn};
 use crate::vault::*;
 use anyhow::{bail, Context, Result};
 use clap::{builder::PossibleValuesParser, CommandFactory};
@@ -72,13 +72,9 @@ fn write_runtime_dir(
 /// Resolves the cached env and file secrets of `account` from the keychain only, if the
 /// profile was loaded before. Only secrets that are still configured are exported, and their
 /// kind always comes from the current config.
-fn resolve_cached(
-    loader: &Loader,
-    runtime: &RuntimeDir,
-    account: &Profile,
-) -> Result<(Vec<Variable>, usize)> {
+fn resolve_cached(loader: &Loader, runtime: &RuntimeDir, account: &Profile) -> Result<Resolved> {
     let Some(names) = loader.cache.loaded(&account.name)? else {
-        return Ok((Vec::new(), 0));
+        return Ok(Resolved::default());
     };
 
     let secrets = account
@@ -114,20 +110,43 @@ impl LoadCommand {
         };
         let runtime = RuntimeDir::new(args.output.runtime_dir.clone());
 
-        // Export the environment and file secrets
-        let variables = secrets.iter().copied().filter(|s| s.is_variable());
-        let (variables, mut failed) =
-            self.loader
-                .resolve(&runtime, account, variables, Source::Any(args.refresh));
+        // Export the environment and file secrets, unless the statements would only be shown
+        // on a terminal: then the variables can't be set, and secrets must not be printed
+        let selected: Vec<&Secret> = secrets
+            .iter()
+            .copied()
+            .filter(|s| s.is_variable())
+            .collect();
+        let stranded = args.output.statements_stranded();
+        let resolved = if stranded {
+            Resolved::default()
+        } else {
+            self.loader.resolve(
+                &runtime,
+                account,
+                selected.iter().copied(),
+                Source::Any(args.refresh),
+            )
+        };
         let format = args.output.export_format();
         write_runtime_dir(&mut self.writer, format, &runtime, args.output.is_eval())?;
-        write_variables(&mut self.writer, format, &variables)?;
-        if !variables.is_empty() {
-            info(format!(
-                "loaded {} environment and file secret(s)",
-                variables.len()
+        write_variables(&mut self.writer, format, &resolved.variables)?;
+        if !resolved.variables.is_empty() {
+            let source = match (resolved.cached, resolved.fetched) {
+                (0, _) => format!("from {}", account.provider),
+                (_, 0) => "from the keychain".to_string(),
+                (cached, fetched) => format!(
+                    "{cached} from the keychain, {fetched} from {}",
+                    account.provider
+                ),
+            };
+            success(format!(
+                "Loaded {} from {}  ({source})",
+                count(resolved.variables.len(), "secret"),
+                account.name
             ));
         }
+        let mut failed = resolved.failed;
 
         // Add the SSH keys to the agent
         let keys: Vec<&Secret> = secrets
@@ -136,6 +155,15 @@ impl LoadCommand {
             .filter(|s| s.kind == SecretKind::Ssh)
             .collect();
         failed += self.add_keys(account, &keys, args);
+
+        // SSH keys don't need the shell; variables do
+        if stranded && !selected.is_empty() {
+            bail!(
+                "{} not set: the shell integration isn't active here; {}",
+                count(selected.len(), "variable"),
+                args.output.integration_hint("load")
+            );
+        }
 
         // Record a fully loaded profile, so its cached secrets are exported in new shells
         if args.names.is_empty() {
@@ -191,14 +219,18 @@ impl LoadCommand {
         }
 
         if added > 0 {
-            info(format!(
-                "added {added} SSH key(s) with {} expiration",
-                args.expiration
+            let expiry = lifetime
+                .map(duration)
+                .unwrap_or_else(|| args.expiration.clone());
+            success(format!(
+                "Added {} to ssh-agent  (expire in {expiry})",
+                count(added, "SSH key")
             ));
         }
         if kept > 0 {
             info(format!(
-                "{kept} SSH key(s) already in the agent (use --refresh to reset their expiration)"
+                "{} already in ssh-agent (use --refresh to reset the expiration)",
+                count(kept, "SSH key")
             ));
         }
 
@@ -241,17 +273,21 @@ impl UnloadCommand {
             bail!("unload prints shell statements; use --format zsh or --format bash");
         }
 
-        // Unset the variables, deleting the files of file secrets keysafe wrote
+        // Unset the variables, deleting the files of file secrets keysafe wrote. Without a way
+        // to reach the shell, the variables stay, and so do the files they point to.
         let variables: Vec<&Secret> = secrets
             .iter()
             .copied()
             .filter(|s| s.is_variable())
             .collect();
-        for secret in &variables {
-            if secret.kind == SecretKind::File {
-                self.remove_file(profile, secret);
+        let stranded = args.output.statements_stranded();
+        if !stranded {
+            for secret in &variables {
+                if secret.kind == SecretKind::File {
+                    self.remove_file(profile, secret);
+                }
+                writeln!(self.writer, "unset {}", secret.name)?;
             }
-            writeln!(self.writer, "unset {}", secret.name)?;
         }
 
         // Remove the SSH keys keysafe added from the agent
@@ -262,16 +298,32 @@ impl UnloadCommand {
             .collect();
         let (removed, failed) = self.remove_keys(profile, &keys);
 
+        // SSH keys don't need the shell; variables do
+        if stranded && !variables.is_empty() {
+            if removed > 0 {
+                success(format!(
+                    "Removed {} from ssh-agent",
+                    count(removed, "SSH key")
+                ));
+            }
+            bail!(
+                "{} not unset: the shell integration isn't active here; {}",
+                count(variables.len(), "variable"),
+                args.output.integration_hint("unload")
+            );
+        }
+
         // An unloaded profile is no longer exported in new shells; its cache stays
         if args.names.is_empty() {
             self.cache.forget(&profile.name)?;
         }
 
-        info(format!(
-            "unloaded {} variable(s) and {removed} SSH key(s) of profile '{}'",
-            variables.len(),
-            profile.name
-        ));
+        let unloaded = match (variables.len(), removed) {
+            (n, 0) => count(n, "secret"),
+            (0, k) => count(k, "SSH key"),
+            (n, k) => format!("{} and {}", count(n, "secret"), count(k, "SSH key")),
+        };
+        success(format!("Unloaded {unloaded} from {}", profile.name));
         finish(failed)
     }
 
@@ -364,8 +416,8 @@ impl ReadCommand {
             );
         }
 
-        let value = self.loader.load(account, secret, args.refresh)?;
-        writeln!(self.writer, "{value}")?;
+        let loaded = self.loader.load(account, secret, args.refresh)?;
+        writeln!(self.writer, "{}", loaded.value)?;
         Ok(())
     }
 }
@@ -392,7 +444,7 @@ impl ExportCommand {
         let mut variables = Vec::new();
         let mut failed = 0;
         for account in accounts {
-            let (mut resolved, count) = if args.cached {
+            let mut resolved = if args.cached {
                 resolve_cached(&self.loader, &runtime, account)?
             } else {
                 let secrets = account.secrets.iter().filter(|s| s.is_variable());
@@ -402,8 +454,8 @@ impl ExportCommand {
                 self.loader.cache.save(account)?;
                 resolved
             };
-            variables.append(&mut resolved);
-            failed += count;
+            variables.append(&mut resolved.variables);
+            failed += resolved.failed;
         }
 
         let format = args.output.export_format();
@@ -509,7 +561,7 @@ impl InitCommand {
         let mut variables = Vec::new();
         for account in &config.profiles {
             match resolve_cached(&self.loader, &runtime, account) {
-                Ok((mut resolved, _)) => variables.append(&mut resolved),
+                Ok(mut resolved) => variables.append(&mut resolved.variables),
                 Err(err) => warn(format!("{err:#}")),
             }
         }
@@ -540,9 +592,11 @@ impl ExecCommand {
         let runtime = RuntimeDir::new(Some(dir.path().to_path_buf()));
 
         let secrets = account.secrets.iter().filter(|s| s.is_variable());
-        let (variables, failed) =
-            self.loader
-                .resolve(&runtime, account, secrets, Source::Any(args.refresh));
+        let Resolved {
+            variables, failed, ..
+        } = self
+            .loader
+            .resolve(&runtime, account, secrets, Source::Any(args.refresh));
         // Do not run the command with a partial environment
         finish(failed)?;
 
@@ -638,10 +692,15 @@ impl StatusCommand {
         };
 
         match args.shell {
-            Some(shell) => writeln!(self.writer, "Shell integration: active ({shell})")?,
+            Some(shell) => writeln!(
+                self.writer,
+                "Shell integration: {}",
+                styled(format!("active ({shell})")).green()
+            )?,
             None => writeln!(
                 self.writer,
-                "Shell integration: not active (add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `init bash` to ~/.bashrc)"
+                "Shell integration: {} (add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `init bash` to ~/.bashrc)",
+                styled("not active").yellow()
             )?,
         }
         writeln!(self.writer, "Config: {}", args.parent.config.display())?;
@@ -664,7 +723,12 @@ impl StatusCommand {
             } else {
                 ""
             };
-            writeln!(self.writer, "Profile: {}{default}", profile.name)?;
+            writeln!(
+                self.writer,
+                "{} {}{default}",
+                styled("Profile:").bold(),
+                styled(&profile.name).bold()
+            )?;
             let exported = self.cache.loaded(&profile.name)?.is_some();
             writeln!(
                 self.writer,
@@ -685,11 +749,13 @@ impl StatusCommand {
                 for secret in variables {
                     let state = match self.environment.get(&secret.name) {
                         Some(value) if !value.is_empty() => match secret.kind {
-                            SecretKind::File if Path::new(value).exists() => "set (file)",
-                            SecretKind::File => "set, but the file is missing",
-                            _ => "set",
+                            SecretKind::File if Path::new(value).exists() => {
+                                styled("set (file)").green()
+                            }
+                            SecretKind::File => styled("set, but the file is missing").yellow(),
+                            _ => styled("set").green(),
                         },
-                        _ => "not set",
+                        _ => styled("not set").dim(),
                     };
                     writeln!(self.writer, "    {:<width$}  {state}", secret.name)?;
                 }
@@ -704,18 +770,19 @@ impl StatusCommand {
                 writeln!(self.writer, "  SSH keys:")?;
                 for key in keys {
                     let state = match &present {
-                        None => "SSH agent not running".to_string(),
+                        None => styled("SSH agent not running".to_string()).yellow(),
                         Some(present) => records
                             .iter()
                             .filter(|r| r.profile == profile.name && r.name == key.name)
                             .find(|r| present.contains(&r.fingerprint))
                             .map(|r| match r.expires.checked_sub(self.now) {
                                 Some(left) if left > 0 => {
-                                    format!("in agent, expires in {}", duration(left))
+                                    styled(format!("in agent, expires in {}", duration(left)))
+                                        .green()
                                 }
-                                _ => "in agent".to_string(),
+                                _ => styled("in agent".to_string()).green(),
                             })
-                            .unwrap_or_else(|| "not in agent".to_string()),
+                            .unwrap_or_else(|| styled("not in agent".to_string()).dim()),
                     };
                     writeln!(self.writer, "    {:<width$}  {state}", key.name)?;
                 }
@@ -749,10 +816,8 @@ impl ConfigInitCommand {
         std::fs::write(path, STARTER_CONFIG)
             .with_context(|| format!("failed to write {}", path.display()))?;
 
-        info(format!(
-            "created {}; add your secrets with `keysafe config edit`",
-            path.display()
-        ));
+        success(format!("Created {}", path.display()));
+        info("add your secrets with `keysafe config edit`");
         Ok(())
     }
 }
@@ -788,10 +853,10 @@ impl ConfigEditCommand {
 
         let config = Config::read_from_file(path)
             .context("the config is not valid; fix it with `keysafe config edit`")?;
-        info(format!(
-            "{} is valid ({} profile(s))",
+        success(format!(
+            "{} is valid  ({})",
             path.display(),
-            config.profiles.len()
+            count(config.profiles.len(), "profile")
         ));
         Ok(())
     }
@@ -878,7 +943,18 @@ pub struct DoctorCommand {
 impl DoctorCommand {
     /// Writes one check.
     fn report(&mut self, check: Check, label: &str, detail: impl Display) -> Result<()> {
-        writeln!(self.writer, "{} {label}: {detail}", check.mark())?;
+        let mark = styled(check.mark());
+        let mark = match check {
+            Check::Ok => mark.green(),
+            Check::Warning => mark.yellow(),
+            Check::Failure => mark.red(),
+        };
+        writeln!(
+            self.writer,
+            "{} {}: {detail}",
+            mark.bold(),
+            styled(label).bold()
+        )?;
         Ok(())
     }
 
@@ -1023,7 +1099,12 @@ impl ProfileShowCommand {
             } else {
                 ""
             };
-            writeln!(self.writer, "Profile: {}{default}", account.name)?;
+            writeln!(
+                self.writer,
+                "{} {}{default}",
+                styled("Profile:").bold(),
+                styled(&account.name).bold()
+            )?;
             match &account.provider {
                 Provider::OnePassword {
                     account: Some(name),
@@ -1064,9 +1145,10 @@ impl ProfileClearCommand {
         let config = Config::read_from_file(&args.parent.config)?;
         let account = config.profile(&args.profile)?;
 
-        let count = self.cache.clear(account)?;
-        info(format!(
-            "cleared {count} cached secret(s) for profile '{}'",
+        let cleared = self.cache.clear(account)?;
+        success(format!(
+            "Cleared {} of {}",
+            count(cleared, "cached secret"),
             account.name
         ));
         Ok(())
@@ -1175,7 +1257,7 @@ mod tests {
             OutputArgs {
                 format: Some(format),
                 runtime_dir: Some(self.runtime_dir()),
-                eval: None,
+                ..Default::default()
             }
         }
 
@@ -1192,10 +1274,7 @@ mod tests {
         }
 
         fn loader(&self, client: MockSecretClient) -> Loader {
-            Loader {
-                client: Box::new(client),
-                cache: self.cache(),
-            }
+            Loader::new(Box::new(client), self.cache())
         }
 
         fn value(&self, profile: &str, name: &str) -> Option<String> {
@@ -2512,6 +2591,146 @@ mod tests {
         })?;
 
         assert!(!writer.contents().contains("SSH agent"));
+        Ok(())
+    }
+
+    /// Output settings for a terminal without the shell integration.
+    fn terminal_output() -> OutputArgs {
+        OutputArgs {
+            terminal: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn load_on_a_terminal_adds_keys_but_never_prints_secrets() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "GITHUB_TOKEN", "brown-fox")
+            .cached("personal", "my-key", &TEST_KEY);
+        let mut agent = agent(vec![]);
+        agent.expect_add().times(1).returning(|_, _| Ok(()));
+        let writer = Writer::new();
+        let mut cmd = LoadCommand {
+            writer: Box::new(writer.clone()),
+            loader: fixture.loader(offline()),
+            agent: Box::new(agent),
+        };
+
+        let result = cmd.execute(&LoadCommandArgs {
+            output: terminal_output(),
+            ..load_args(&fixture, &["GITHUB_TOKEN", "my-key"], false)
+        });
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.starts_with(
+                "1 variable not set: the shell integration isn't active here; add `eval"
+            ),
+            "{err}"
+        );
+        assert_eq!(writer.contents(), "");
+        Ok(())
+    }
+
+    #[test]
+    fn load_on_a_terminal_works_for_ssh_keys_alone() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "my-key", &TEST_KEY);
+        let mut agent = agent(vec![]);
+        agent.expect_add().times(1).returning(|_, _| Ok(()));
+        let mut cmd = LoadCommand {
+            writer: Box::new(Writer::new()),
+            loader: fixture.loader(offline()),
+            agent: Box::new(agent),
+        };
+
+        cmd.execute(&LoadCommandArgs {
+            output: terminal_output(),
+            ..load_args(&fixture, &["my-key"], false)
+        })
+    }
+
+    #[test]
+    fn unload_on_a_terminal_removes_keys_but_keeps_variables() -> Result<()> {
+        let fixture = Fixture::new().loaded("personal", "env:GITHUB_TOKEN\n");
+        let file = RuntimeDir::new(Some(fixture.runtime_dir())).write(
+            "personal",
+            "GCP_CREDENTIALS",
+            "{}",
+        )?;
+        let key = fingerprint(&TEST_KEY)?;
+        fixture.cache().record_keys(
+            &[KeyRecord {
+                profile: "personal".into(),
+                name: "my-key".into(),
+                fingerprint: key.clone(),
+                public_key: public_key(&TEST_KEY)?,
+                expires: u64::MAX,
+            }],
+            0,
+        )?;
+        let mut agent = agent(vec![key]);
+        agent.expect_remove().times(1).returning(|_| Ok(()));
+        let writer = Writer::new();
+        let mut cmd = UnloadCommand {
+            writer: Box::new(writer.clone()),
+            ..unload(
+                &fixture,
+                agent,
+                &[("GCP_CREDENTIALS", &file.to_string_lossy())],
+            )
+        };
+
+        let result = cmd.execute(&UnloadCommandArgs {
+            output: terminal_output(),
+            ..unload_args(&fixture, &[])
+        });
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("2 variables not unset: the shell integration isn't active here"));
+        assert_eq!(writer.contents(), "");
+        assert!(file.exists());
+        assert!(fixture.cache().loaded("personal")?.is_some());
+        assert_eq!(fixture.cache().keys()?, vec![]);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_reports_where_values_came_from() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "GITHUB_TOKEN", "a");
+        let mut client = MockSecretClient::new();
+        expect_read(&mut client, "op://Personal/GCP/credentials", "{}");
+        client
+            .expect_read()
+            .withf(|_, p| p == "op://Infra/Prod/API_KEY")
+            .returning(|_, _| Err(anyhow::anyhow!("oh no")));
+        let loader = fixture.loader(client);
+        let config = Config::read_from_file(&fixture.parent().config)?;
+        let personal = config.profile("personal")?;
+        let runtime = RuntimeDir::new(Some(fixture.runtime_dir()));
+
+        let resolved = loader.resolve(
+            &runtime,
+            personal,
+            personal.secrets.iter().filter(|s| s.is_variable()),
+            Source::Any(false),
+        );
+        assert_eq!(
+            (resolved.cached, resolved.fetched, resolved.failed),
+            (1, 1, 0)
+        );
+        assert_eq!(resolved.variables.len(), 2);
+
+        let work = config.profile("work")?;
+        let resolved = loader.resolve(&runtime, work, &work.secrets, Source::Any(false));
+        assert_eq!(
+            resolved,
+            Resolved {
+                failed: 1,
+                ..Default::default()
+            }
+        );
         Ok(())
     }
 

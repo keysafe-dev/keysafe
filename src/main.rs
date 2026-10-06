@@ -25,6 +25,7 @@ fn main() -> ExitCode {
     std::env::remove_var("KEYSAFE_RUNTIME_DIR");
     std::env::remove_var("KEYSAFE_SHELL");
 
+    log::set_style_stdout(console::colors_enabled());
     let parent = program.command.parent_mut();
     log::set_level(match (parent.quiet, parent.verbose) {
         (true, _) => log::Level::Quiet,
@@ -62,7 +63,7 @@ fn main() -> ExitCode {
     match run(program) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("keysafe: error: {err:#}");
+            log::error(format!("{err:#}"));
             ExitCode::FAILURE
         }
     }
@@ -70,9 +71,8 @@ fn main() -> ExitCode {
 
 fn run(program: Program) -> Result<ExitCode> {
     match program.command {
-        ProgramCommand::Load(args) => {
-            args.output
-                .check_destination("load", std::io::stdout().is_terminal())?;
+        ProgramCommand::Load(mut args) => {
+            args.output.terminal = std::io::stdout().is_terminal();
             let writer = statements(&args.output);
             let loader = loader(&args.parent);
             let agent = Box::new(Agent::new());
@@ -83,9 +83,8 @@ fn run(program: Program) -> Result<ExitCode> {
             };
             command.execute(&args)?
         }
-        ProgramCommand::Unload(args) => {
-            args.output
-                .check_destination("unload", std::io::stdout().is_terminal())?;
+        ProgramCommand::Unload(mut args) => {
+            args.output.terminal = std::io::stdout().is_terminal();
             let writer = statements(&args.output);
             let cache = cache(&args.parent);
             let agent = Box::new(Agent::new());
@@ -225,10 +224,7 @@ fn cache(parent: &ProgramArgs) -> Cache {
 
 /// Returns a loader reading from the keychain cache and the 1Password CLI.
 fn loader(parent: &ProgramArgs) -> Loader {
-    Loader {
-        client: Box::new(Client::new()),
-        cache: cache(parent),
-    }
+    Loader::new(Box::new(Client::new()), cache(parent))
 }
 
 /// Maps the exit status of a child process to our own, shell style.
