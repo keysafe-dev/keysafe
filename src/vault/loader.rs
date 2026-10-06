@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::cell::Cell;
 
 use crate::log::{debug, spinner, warn};
 use crate::vault::{
@@ -43,43 +42,62 @@ pub enum KeyOutcome {
     Present,
 }
 
+/// Where a secret's value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The keychain cache.
+    Cache,
+    /// The profile's provider, e.g. 1Password.
+    Provider,
+}
+
+/// A secret's value and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loaded {
+    /// The secret's value.
+    pub value: String,
+    /// Where the value came from.
+    pub origin: Origin,
+}
+
+/// The variables [`Loader::resolve`] produced, and how they were obtained.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Resolved {
+    /// The variables of the secrets that were resolved.
+    pub variables: Vec<Variable>,
+    /// How many of them came from the keychain cache.
+    pub cached: usize,
+    /// How many of them were fetched from the provider.
+    pub fetched: usize,
+    /// How many secrets failed; each failure was reported.
+    pub failed: usize,
+}
+
 /// Loader resolves secret values from the keychain cache or 1Password.
 pub struct Loader {
     /// Client used to fetch secrets from 1Password.
     pub client: Box<dyn SecretClient>,
     /// Cache holding previously fetched secrets.
     pub cache: Cache,
-    /// Number of secrets read from the cache.
-    cached: Cell<usize>,
-    /// Number of secrets fetched from their provider.
-    fetched: Cell<usize>,
 }
 
 impl Loader {
     /// Creates a loader fetching with `client` and caching in `cache`.
     pub fn new(client: Box<dyn SecretClient>, cache: Cache) -> Self {
-        Self {
-            client,
-            cache,
-            cached: Cell::new(0),
-            fetched: Cell::new(0),
-        }
-    }
-
-    /// Returns how many secrets were read from the cache and fetched from their provider.
-    pub fn counts(&self) -> (usize, usize) {
-        (self.cached.get(), self.fetched.get())
+        Self { client, cache }
     }
 
     /// Returns the value of `secret`: from the cache unless `refresh` is set, otherwise
     /// from 1Password, caching the fetched value.
-    pub fn load(&self, account: &Profile, secret: &Secret, refresh: bool) -> Result<String> {
+    pub fn load(&self, account: &Profile, secret: &Secret, refresh: bool) -> Result<Loaded> {
         if !refresh {
             match self.cache.get(&account.name, &secret.name) {
                 Ok(Some(value)) => {
                     debug(format!("'{}' from the keychain", secret.name));
-                    self.cached.set(self.cached.get() + 1);
-                    return Ok(value);
+                    return Ok(Loaded {
+                        value,
+                        origin: Origin::Cache,
+                    });
                 }
                 Ok(None) => {}
                 Err(err) => warn(format!("{err:#}; fetching it from 1Password")),
@@ -97,12 +115,14 @@ impl Loader {
             ));
             self.client.read(&account.provider, &secret.path)?
         };
-        self.fetched.set(self.fetched.get() + 1);
         // A failed cache write only costs a 1Password round trip next time.
         if let Err(err) = self.cache.set(&account.name, &secret.name, &value) {
             warn(format!("{err:#}"));
         }
-        Ok(value)
+        Ok(Loaded {
+            value,
+            origin: Origin::Provider,
+        })
     }
 
     /// Resolves the variables of the given env and file secrets, writing file secrets to
@@ -113,36 +133,51 @@ impl Loader {
         account: &Profile,
         secrets: impl IntoIterator<Item = &'a Secret>,
         source: Source,
-    ) -> (Vec<Variable>, usize) {
-        let mut variables = Vec::new();
-        let mut failed = 0;
+    ) -> Resolved {
+        let mut resolved = Resolved::default();
 
         for secret in secrets {
             let result = match source {
-                Source::Cache => self.cache.get(&account.name, &secret.name),
+                Source::Cache => self.cache.get(&account.name, &secret.name).map(|value| {
+                    value.map(|value| Loaded {
+                        value,
+                        origin: Origin::Cache,
+                    })
+                }),
                 Source::Any(refresh) => self.load(account, secret, refresh).map(Some),
             }
-            .and_then(|value| match (value, secret.kind) {
-                (Some(value), SecretKind::File) => runtime
-                    .write(&account.name, &secret.name, &value)
-                    .map(|path| Some(path.to_string_lossy().into_owned())),
-                (value, _) => Ok(value),
+            .and_then(|loaded| match (loaded, secret.kind) {
+                (Some(loaded), SecretKind::File) => runtime
+                    .write(&account.name, &secret.name, &loaded.value)
+                    .map(|path| {
+                        Some(Loaded {
+                            value: path.to_string_lossy().into_owned(),
+                            origin: loaded.origin,
+                        })
+                    }),
+                (loaded, _) => Ok(loaded),
             });
 
             match result {
-                Ok(Some(value)) => variables.push(Variable {
-                    key: secret.name.clone(),
-                    value,
-                }),
+                Ok(Some(loaded)) => {
+                    match loaded.origin {
+                        Origin::Cache => resolved.cached += 1,
+                        Origin::Provider => resolved.fetched += 1,
+                    }
+                    resolved.variables.push(Variable {
+                        key: secret.name.clone(),
+                        value: loaded.value,
+                    });
+                }
                 Ok(None) => {}
                 Err(err) => {
                     warn(format!("failed to load '{}': {err:#}", secret.name));
-                    failed += 1;
+                    resolved.failed += 1;
                 }
             }
         }
 
-        (variables, failed)
+        resolved
     }
 
     /// Adds the SSH key `secret` to the agent, unless the agent already holds it and
@@ -156,7 +191,7 @@ impl Loader {
         lifetime: &str,
         refresh: bool,
     ) -> Result<KeyOutcome> {
-        let key = self.load(account, secret, refresh)?;
+        let key = self.load(account, secret, refresh)?.value;
         let added =
             fingerprint(&key)
                 .ok()

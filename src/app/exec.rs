@@ -72,13 +72,9 @@ fn write_runtime_dir(
 /// Resolves the cached env and file secrets of `account` from the keychain only, if the
 /// profile was loaded before. Only secrets that are still configured are exported, and their
 /// kind always comes from the current config.
-fn resolve_cached(
-    loader: &Loader,
-    runtime: &RuntimeDir,
-    account: &Profile,
-) -> Result<(Vec<Variable>, usize)> {
+fn resolve_cached(loader: &Loader, runtime: &RuntimeDir, account: &Profile) -> Result<Resolved> {
     let Some(names) = loader.cache.loaded(&account.name)? else {
-        return Ok((Vec::new(), 0));
+        return Ok(Resolved::default());
     };
 
     let secrets = account
@@ -122,8 +118,8 @@ impl LoadCommand {
             .filter(|s| s.is_variable())
             .collect();
         let stranded = args.output.statements_stranded();
-        let (variables, mut failed) = if stranded {
-            (Vec::new(), 0)
+        let resolved = if stranded {
+            Resolved::default()
         } else {
             self.loader.resolve(
                 &runtime,
@@ -134,23 +130,23 @@ impl LoadCommand {
         };
         let format = args.output.export_format();
         write_runtime_dir(&mut self.writer, format, &runtime, args.output.is_eval())?;
-        write_variables(&mut self.writer, format, &variables)?;
-        if !variables.is_empty() {
-            let (cached, fetched) = self.loader.counts();
-            let source = match (cached, fetched) {
+        write_variables(&mut self.writer, format, &resolved.variables)?;
+        if !resolved.variables.is_empty() {
+            let source = match (resolved.cached, resolved.fetched) {
                 (0, _) => format!("from {}", account.provider),
                 (_, 0) => "from the keychain".to_string(),
-                _ => format!(
+                (cached, fetched) => format!(
                     "{cached} from the keychain, {fetched} from {}",
                     account.provider
                 ),
             };
             success(format!(
                 "Loaded {} from {}  ({source})",
-                count(variables.len(), "secret"),
+                count(resolved.variables.len(), "secret"),
                 account.name
             ));
         }
+        let mut failed = resolved.failed;
 
         // Add the SSH keys to the agent
         let keys: Vec<&Secret> = secrets
@@ -420,8 +416,8 @@ impl ReadCommand {
             );
         }
 
-        let value = self.loader.load(account, secret, args.refresh)?;
-        writeln!(self.writer, "{value}")?;
+        let loaded = self.loader.load(account, secret, args.refresh)?;
+        writeln!(self.writer, "{}", loaded.value)?;
         Ok(())
     }
 }
@@ -448,7 +444,7 @@ impl ExportCommand {
         let mut variables = Vec::new();
         let mut failed = 0;
         for account in accounts {
-            let (mut resolved, count) = if args.cached {
+            let mut resolved = if args.cached {
                 resolve_cached(&self.loader, &runtime, account)?
             } else {
                 let secrets = account.secrets.iter().filter(|s| s.is_variable());
@@ -458,8 +454,8 @@ impl ExportCommand {
                 self.loader.cache.save(account)?;
                 resolved
             };
-            variables.append(&mut resolved);
-            failed += count;
+            variables.append(&mut resolved.variables);
+            failed += resolved.failed;
         }
 
         let format = args.output.export_format();
@@ -565,7 +561,7 @@ impl InitCommand {
         let mut variables = Vec::new();
         for account in &config.profiles {
             match resolve_cached(&self.loader, &runtime, account) {
-                Ok((mut resolved, _)) => variables.append(&mut resolved),
+                Ok(mut resolved) => variables.append(&mut resolved.variables),
                 Err(err) => warn(format!("{err:#}")),
             }
         }
@@ -596,9 +592,11 @@ impl ExecCommand {
         let runtime = RuntimeDir::new(Some(dir.path().to_path_buf()));
 
         let secrets = account.secrets.iter().filter(|s| s.is_variable());
-        let (variables, failed) =
-            self.loader
-                .resolve(&runtime, account, secrets, Source::Any(args.refresh));
+        let Resolved {
+            variables, failed, ..
+        } = self
+            .loader
+            .resolve(&runtime, account, secrets, Source::Any(args.refresh));
         // Do not run the command with a partial environment
         finish(failed)?;
 
@@ -2631,8 +2629,6 @@ mod tests {
             "{err}"
         );
         assert_eq!(writer.contents(), "");
-        // Only the SSH key was read; the variable wasn't even fetched
-        assert_eq!(cmd.loader.counts(), (1, 0));
         Ok(())
     }
 
@@ -2697,6 +2693,44 @@ mod tests {
         assert!(file.exists());
         assert!(fixture.cache().loaded("personal")?.is_some());
         assert_eq!(fixture.cache().keys()?, vec![]);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_reports_where_values_came_from() -> Result<()> {
+        let fixture = Fixture::new().cached("personal", "GITHUB_TOKEN", "a");
+        let mut client = MockSecretClient::new();
+        expect_read(&mut client, "op://Personal/GCP/credentials", "{}");
+        client
+            .expect_read()
+            .withf(|_, p| p == "op://Infra/Prod/API_KEY")
+            .returning(|_, _| Err(anyhow::anyhow!("oh no")));
+        let loader = fixture.loader(client);
+        let config = Config::read_from_file(&fixture.parent().config)?;
+        let personal = config.profile("personal")?;
+        let runtime = RuntimeDir::new(Some(fixture.runtime_dir()));
+
+        let resolved = loader.resolve(
+            &runtime,
+            personal,
+            personal.secrets.iter().filter(|s| s.is_variable()),
+            Source::Any(false),
+        );
+        assert_eq!(
+            (resolved.cached, resolved.fetched, resolved.failed),
+            (1, 1, 0)
+        );
+        assert_eq!(resolved.variables.len(), 2);
+
+        let work = config.profile("work")?;
+        let resolved = loader.resolve(&runtime, work, &work.secrets, Source::Any(false));
+        assert_eq!(
+            resolved,
+            Resolved {
+                failed: 1,
+                ..Default::default()
+            }
+        );
         Ok(())
     }
 
