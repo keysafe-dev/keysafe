@@ -1,6 +1,7 @@
 use anyhow::Result;
+use std::cell::Cell;
 
-use crate::log::{debug, warn};
+use crate::log::{debug, spinner, warn};
 use crate::vault::{
     fingerprint, public_key, Cache, KeyAgent, Profile, RuntimeDir, Secret, SecretClient, SecretKind,
 };
@@ -48,9 +49,28 @@ pub struct Loader {
     pub client: Box<dyn SecretClient>,
     /// Cache holding previously fetched secrets.
     pub cache: Cache,
+    /// Number of secrets read from the cache.
+    cached: Cell<usize>,
+    /// Number of secrets fetched from their provider.
+    fetched: Cell<usize>,
 }
 
 impl Loader {
+    /// Creates a loader fetching with `client` and caching in `cache`.
+    pub fn new(client: Box<dyn SecretClient>, cache: Cache) -> Self {
+        Self {
+            client,
+            cache,
+            cached: Cell::new(0),
+            fetched: Cell::new(0),
+        }
+    }
+
+    /// Returns how many secrets were read from the cache and fetched from their provider.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.cached.get(), self.fetched.get())
+    }
+
     /// Returns the value of `secret`: from the cache unless `refresh` is set, otherwise
     /// from 1Password, caching the fetched value.
     pub fn load(&self, account: &Profile, secret: &Secret, refresh: bool) -> Result<String> {
@@ -58,6 +78,7 @@ impl Loader {
             match self.cache.get(&account.name, &secret.name) {
                 Ok(Some(value)) => {
                     debug(format!("'{}' from the keychain", secret.name));
+                    self.cached.set(self.cached.get() + 1);
                     return Ok(value);
                 }
                 Ok(None) => {}
@@ -69,7 +90,14 @@ impl Loader {
             "'{}' from {} ({})",
             secret.name, account.provider, secret.path
         ));
-        let value = self.client.read(&account.provider, &secret.path)?;
+        let value = {
+            let _spinner = spinner(format!(
+                "Fetching {} from {}…",
+                secret.name, account.provider
+            ));
+            self.client.read(&account.provider, &secret.path)?
+        };
+        self.fetched.set(self.fetched.get() + 1);
         // A failed cache write only costs a 1Password round trip next time.
         if let Err(err) = self.cache.set(&account.name, &secret.name, &value) {
             warn(format!("{err:#}"));

@@ -177,7 +177,7 @@ keysafe exec -p work -- terraform plan  # run one command with the secrets; file
 keysafe export -p work --format json    # the secrets as a JSON object
 ```
 
-Without the shell integration, for example in scripts, `load` and `export` print `export` statements to evaluate yourself, since a program can't change the environment of the shell that started it:
+Without the shell integration, `load` and `export` print `export` statements to evaluate yourself, since a program can't change the environment of the shell that started it. On a terminal, `load` and `unload` never print them, so secrets don't end up on screen: they still add or remove SSH keys, and say how to set up the integration for the variables.
 
 ```bash
 eval "$(keysafe export -p work)"

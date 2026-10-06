@@ -432,7 +432,7 @@ impl Display for ExportFormat {
 }
 
 /// OutputArgs holds the flags shared by subcommands that emit secrets.
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct OutputArgs {
     /// Output format for the exported secrets.
     /// Auto-detected from $SHELL if not provided.
@@ -456,6 +456,10 @@ pub struct OutputArgs {
     /// Set by the script that `init` prints; not meant to be set by hand.
     #[arg(long, env = "KEYSAFE_EVAL", hide = true)]
     pub eval: Option<Shell>,
+
+    /// Whether stdout is a terminal. Set by `main`, not a command-line flag.
+    #[arg(skip)]
+    pub terminal: bool,
 }
 
 impl OutputArgs {
@@ -465,20 +469,22 @@ impl OutputArgs {
         self.eval.is_some() && self.format.is_none()
     }
 
-    /// Fails when the shell statements of `command` would only be printed on a terminal:
-    /// without the shell integration and without an explicit --format, they would show
-    /// secret values on screen without changing the shell.
-    pub fn check_destination(&self, command: &str, stdout_is_terminal: bool) -> anyhow::Result<()> {
-        if stdout_is_terminal && self.eval.is_none() && self.format.is_none() {
-            let (shell, rc) = match self.export_format() {
-                ExportFormat::Bash => ("bash", "~/.bashrc"),
-                _ => ("zsh", "~/.zshrc"),
-            };
-            anyhow::bail!(
-                "`{command}` changes your shell through the shell integration, which isn't active here; add `eval \"$(keysafe init {shell})\"` to {rc}, or run `eval \"$(keysafe {command})\"`"
-            );
-        }
-        Ok(())
+    /// Returns true when shell statements can't reach the shell: stdout is a terminal, the
+    /// shell integration isn't active and no format was requested, so printing them would
+    /// only show secret values on screen.
+    pub fn statements_stranded(&self) -> bool {
+        self.terminal && self.eval.is_none() && self.format.is_none()
+    }
+
+    /// Explains how to make `command` change the shell.
+    pub fn integration_hint(&self, command: &str) -> String {
+        let (shell, rc) = match self.export_format() {
+            ExportFormat::Bash => ("bash", "~/.bashrc"),
+            _ => ("zsh", "~/.zshrc"),
+        };
+        format!(
+            "add `eval \"$(keysafe init {shell})\"` to {rc}, or run `eval \"$(keysafe {command})\"`"
+        )
     }
 
     /// Get the export format: the explicit one, the integration's shell, or $SHELL detection.
@@ -870,33 +876,25 @@ mod tests {
     }
 
     #[test]
-    fn statements_are_not_printed_on_a_terminal_without_the_integration() {
-        let plain = OutputArgs {
-            format: None,
-            eval: None,
+    fn statements_are_stranded_on_a_terminal_without_the_integration() {
+        let terminal = OutputArgs {
+            terminal: true,
             ..Default::default()
         };
-        let err = plain
-            .check_destination("load", true)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.starts_with("`load` changes your shell through the shell integration"),
-            "{err}"
-        );
+        assert!(terminal.statements_stranded());
 
-        // Piped or evaluated, under the integration, or with an explicit format: printed
-        assert!(plain.check_destination("load", false).is_ok());
-        let integrated = OutputArgs {
+        // Piped or evaluated, under the integration, or with an explicit format: they arrive
+        assert!(!OutputArgs::default().statements_stranded());
+        assert!(!OutputArgs {
             eval: Some(Shell::Zsh),
-            ..Default::default()
-        };
-        assert!(integrated.check_destination("load", true).is_ok());
-        let explicit = OutputArgs {
+            ..terminal.clone()
+        }
+        .statements_stranded());
+        assert!(!OutputArgs {
             format: Some(ExportFormat::Zsh),
-            ..Default::default()
-        };
-        assert!(explicit.check_destination("unload", true).is_ok());
+            ..terminal
+        }
+        .statements_stranded());
     }
 
     #[test]
