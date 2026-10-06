@@ -1167,6 +1167,7 @@ mod tests {
             ProgramArgs {
                 config: self.dir.path().join("config.yml"),
                 state_dir: self.dir.path().join("cache"),
+                ..Default::default()
             }
         }
 

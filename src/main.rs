@@ -25,6 +25,13 @@ fn main() -> ExitCode {
     std::env::remove_var("KEYSAFE_RUNTIME_DIR");
     std::env::remove_var("KEYSAFE_SHELL");
 
+    let parent = program.command.parent_mut();
+    log::set_level(match (parent.quiet, parent.verbose) {
+        (true, _) => log::Level::Quiet,
+        (_, true) => log::Level::Verbose,
+        _ => log::Level::Normal,
+    });
+
     // Keep working with the config used before keysafe had its own name. The hint is
     // left out of `init`, which runs on every shell start.
     // `config init` always creates the config at the new location.
@@ -46,6 +53,10 @@ fn main() -> ExitCode {
             }
         }
     }
+
+    let parent = program.command.parent_mut();
+    log::debug(format!("config: {}", parent.config.display()));
+    log::debug(format!("state directory: {}", parent.state_dir.display()));
 
     // Process the correct command
     match run(program) {

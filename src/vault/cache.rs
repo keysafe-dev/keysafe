@@ -5,7 +5,7 @@ use std::{
     sync::OnceLock,
 };
 
-use crate::log::warn;
+use crate::log::{debug, warn};
 use crate::vault::Profile;
 
 /// SecretStore persists secret values in a secure credential store.
@@ -145,6 +145,9 @@ impl Cache {
         };
         match self.store.set(&service, name, &value) {
             Ok(()) => {
+                debug(format!(
+                    "moved '{name}' from {legacy} to {service} in the keychain"
+                ));
                 if let Err(err) = self.store.delete(&legacy, name) {
                     warn(format!("{err:#}"));
                 }

@@ -5,6 +5,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use crate::log::debug;
 use crate::vault::Provider;
 
 #[cfg(test)]
@@ -74,6 +75,12 @@ impl Client {
 
         // stdin and stderr stay attached to the terminal, so `op` can prompt
         // for authorization and report its own errors.
+        debug(format!(
+            "running: op read --no-newline {}{path}",
+            account
+                .map(|a| format!("--account {a} "))
+                .unwrap_or_default()
+        ));
         let output = Command::new("op")
             .args(["read", "--no-newline"])
             .args(Self::account_args(account))

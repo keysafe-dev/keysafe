@@ -132,6 +132,8 @@ Commands:
   init     Print the shell integration script for zsh or bash.
 ```
 
+Every command takes `-q` (warnings and errors only) and `-v` (details for debugging, never secret values), and its `--help` ends with examples.
+
 ### Loading secrets
 
 `load` puts secrets in place: environment secrets are exported, file secrets are written to private files whose paths are exported, and SSH keys are added to ssh-agent.

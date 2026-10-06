@@ -1,4 +1,6 @@
 use anyhow::{bail, Context, Result};
+
+use crate::log::debug;
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -55,6 +57,9 @@ impl KeyAgent for Agent {
 
     fn add(&self, key: &str, lifetime: &str) -> Result<()> {
         // The key is piped through stdin, so it never touches the disk.
+        debug(format!(
+            "running: ssh-add -q -t {lifetime} - (key on stdin)"
+        ));
         let mut child = Command::new("ssh-add")
             .args(["-q", "-t", lifetime, "-"])
             .stdin(Stdio::piped())
@@ -84,6 +89,7 @@ impl KeyAgent for Agent {
         let path = dir.path().join("key.pub");
         std::fs::write(&path, format!("{}\n", public_key.trim_end()))?;
 
+        debug("running: ssh-add -d <public key>");
         let output = Command::new("ssh-add")
             .arg("-d")
             .arg(&path)
