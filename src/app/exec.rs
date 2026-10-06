@@ -1012,7 +1012,25 @@ impl DoctorCommand {
 
         // The keychain: looking up a missing item needs the store, but never prompts
         match self.cache.store.get("keysafe.doctor", "check") {
-            Ok(_) => self.report(Check::Ok, "Keychain", "reachable")?,
+            Ok(_) => {
+                self.report(Check::Ok, "Keychain", "reachable")?;
+
+                // Secrets zsh-op cached under its own service names
+                for profile in profiles {
+                    let Ok(items) = self.cache.legacy_items(&profile.name) else {
+                        continue;
+                    };
+                    if !items.is_empty() {
+                        let detail = format!(
+                            "{} left from zsh-op under {} (remove them with `keysafe profile clear {}`)",
+                            count(items.len(), "item"),
+                            Cache::legacy_service(&profile.name),
+                            profile.name
+                        );
+                        self.report(Check::Warning, "Keychain", detail)?;
+                    }
+                }
+            }
             Err(err) => {
                 failures += 1;
                 self.report(Check::Failure, "Keychain", format!("{err:#}"))?;
@@ -2570,6 +2588,25 @@ mod tests {
         assert!(output.starts_with("✗ Config: config file not found: "));
         assert!(output.contains("✓ Keychain: reachable\n"));
         assert!(output.ends_with("✓ Shell integration: active (bash)\n"));
+    }
+
+    #[test]
+    fn doctor_warns_about_items_left_from_zsh_op() -> Result<()> {
+        let fixture = Fixture::new();
+        fixture.store.set("op-secrets-work", "OLD_TOKEN", "x")?;
+        let mut client = MockSecretClient::new();
+        client.expect_check().returning(|_| Ok("fine".into()));
+        let (mut cmd, writer) = doctor(&fixture, client, agent(vec![]));
+
+        cmd.execute(&DoctorCommandArgs {
+            parent: fixture.parent(),
+            shell: Some(Shell::Zsh),
+        })?;
+
+        assert!(writer.contents().contains(
+            "! Keychain: 1 item left from zsh-op under op-secrets-work (remove them with `keysafe profile clear work`)\n"
+        ));
+        Ok(())
     }
 
     #[test]

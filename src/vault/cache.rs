@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
+    collections::HashMap,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -16,6 +17,8 @@ pub trait SecretStore {
     fn set(&self, service: &str, account: &str, value: &str) -> Result<()>;
     /// Deletes the value stored for `service` / `account`. Returns false if there was none.
     fn delete(&self, service: &str, account: &str) -> Result<bool>;
+    /// Returns the accounts that have a value stored for `service`, without reading values.
+    fn accounts(&self, service: &str) -> Result<Vec<String>>;
 }
 
 /// Keychain stores secrets in the platform credential store: the login keychain on macOS
@@ -29,14 +32,19 @@ impl Keychain {
         Self
     }
 
-    /// Returns the keyring entry for `service` / `account`.
-    fn entry(service: &str, account: &str) -> Result<keyring_core::Entry> {
+    /// Opens the platform credential store, once.
+    fn open() -> Result<()> {
         static STORE: OnceLock<Result<(), String>> = OnceLock::new();
         STORE
             .get_or_init(|| open_store().map_err(|e| e.to_string()))
             .as_ref()
-            .map_err(|e| anyhow!("failed to open the credential store: {e}"))?;
+            .map(|_| ())
+            .map_err(|e| anyhow!("failed to open the credential store: {e}"))
+    }
 
+    /// Returns the keyring entry for `service` / `account`.
+    fn entry(service: &str, account: &str) -> Result<keyring_core::Entry> {
+        Self::open()?;
         Ok(keyring_core::Entry::new(service, account)?)
     }
 }
@@ -59,6 +67,28 @@ fn open_store() -> keyring_core::Result<()> {
 }
 
 impl SecretStore for Keychain {
+    fn accounts(&self, service: &str) -> Result<Vec<String>> {
+        Self::open()?;
+        // A search returns the items' attributes only, so it never prompts for access
+        let spec = HashMap::from([("service", service)]);
+        let entries = keyring_core::Entry::search(&spec)
+            .with_context(|| format!("failed to search the keychain for {service}"))?;
+        let mut accounts: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| match entry.get_specifiers() {
+                Some((_, account)) => Some(account),
+                None => entry.get_attributes().ok().and_then(|attributes| {
+                    ["username", "user", "acct"]
+                        .iter()
+                        .find_map(|key| attributes.get(*key).cloned())
+                }),
+            })
+            .collect();
+        accounts.sort();
+        accounts.dedup();
+        Ok(accounts)
+    }
+
     fn get(&self, service: &str, account: &str) -> Result<Option<String>> {
         match Self::entry(service, account)?.get_password() {
             Ok(value) => Ok(Some(value)),
@@ -129,6 +159,11 @@ impl Cache {
     /// its own name.
     pub fn legacy_service(profile: &str) -> String {
         format!("op-secrets-{profile}")
+    }
+
+    /// Returns the secrets of `profile` still stored under the service zsh-op used.
+    pub fn legacy_items(&self, profile: &str) -> Result<Vec<String>> {
+        self.store.accounts(&Self::legacy_service(profile))
     }
 
     /// Returns the cached value of secret `name` in `profile`.
@@ -216,17 +251,23 @@ impl Cache {
     /// its metadata or stored under the legacy service, and forgets that it was loaded.
     /// Returns the number of deleted secrets.
     pub fn clear(&self, account: &Profile) -> Result<usize> {
-        let mut names: Vec<String> = account.secrets.iter().map(|s| s.name.clone()).collect();
-        for name in self.loaded(&account.name)?.unwrap_or_default() {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-
         let services = [
             Self::service(&account.name),
             Self::legacy_service(&account.name),
         ];
+
+        // Configured and recorded secrets, plus anything else stored under either service,
+        // like secrets since removed from the config
+        let mut names: Vec<String> = account.secrets.iter().map(|s| s.name.clone()).collect();
+        names.extend(self.loaded(&account.name)?.unwrap_or_default());
+        for service in &services {
+            match self.store.accounts(service) {
+                Ok(found) => names.extend(found),
+                Err(err) => debug(format!("{err:#}")),
+            }
+        }
+        names.sort();
+        names.dedup();
         let mut count = 0;
         for name in &names {
             let mut deleted = false;
@@ -361,6 +402,16 @@ impl SecretStore for MemoryStore {
         let key = (service.to_string(), account.to_string());
         Ok(self.0.borrow_mut().remove(&key).is_some())
     }
+
+    fn accounts(&self, service: &str) -> Result<Vec<String>> {
+        Ok(self
+            .0
+            .borrow()
+            .keys()
+            .filter(|(s, _)| s == service)
+            .map(|(_, account)| account.clone())
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -460,6 +511,31 @@ mod tests {
             store.value("keysafe.personal", "GITHUB_TOKEN").as_deref(),
             Some("a")
         );
+    }
+
+    #[test]
+    fn clear_deletes_items_the_config_no_longer_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::with(&[
+            ("op-secrets-personal", "REMOVED_LONG_AGO", "a"),
+            ("keysafe.personal", "ALSO_GONE", "b"),
+            ("op-secrets-work", "OTHER_PROFILE", "c"),
+        ]);
+        let cache = Cache::new(Box::new(store.clone()), dir.path());
+        assert_eq!(
+            cache.legacy_items("personal").unwrap(),
+            ["REMOVED_LONG_AGO"]
+        );
+
+        assert_eq!(cache.clear(&account()).unwrap(), 2);
+
+        assert_eq!(store.value("op-secrets-personal", "REMOVED_LONG_AGO"), None);
+        assert_eq!(store.value("keysafe.personal", "ALSO_GONE"), None);
+        assert_eq!(
+            store.value("op-secrets-work", "OTHER_PROFILE").as_deref(),
+            Some("c")
+        );
+        assert!(cache.legacy_items("personal").unwrap().is_empty());
     }
 
     #[test]
