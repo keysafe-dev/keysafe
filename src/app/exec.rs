@@ -58,8 +58,8 @@ fn write_runtime_dir(
 
     let path = quote(&dir.to_string_lossy());
     match (eval, format) {
-        (true, ExportFormat::Zsh) => writeln!(writer, "typeset -g _SECRET_ENV_RUNTIME_DIR={path}")?,
-        (true, ExportFormat::Bash) => writeln!(writer, "_SECRET_ENV_RUNTIME_DIR={path}")?,
+        (true, ExportFormat::Zsh) => writeln!(writer, "typeset -g _KEYSAFE_RUNTIME_DIR={path}")?,
+        (true, ExportFormat::Bash) => writeln!(writer, "_KEYSAFE_RUNTIME_DIR={path}")?,
         _ => warn(format!(
             "file secrets are written to {}; remove it when done",
             dir.display()
@@ -206,7 +206,7 @@ impl ReadCommand {
         let secret = account.secret(&args.name)?;
         if secret.kind == SecretKind::Ssh {
             bail!(
-                "'{}' is an SSH key, which is not printed; use `secret-env load {}` to add it to ssh-agent",
+                "'{}' is an SSH key, which is not printed; use `keysafe load {}` to add it to ssh-agent",
                 secret.name,
                 secret.name
             );
@@ -282,7 +282,7 @@ fn completion(shell: Shell, config: Option<&Config>) -> Result<String> {
         Shell::Bash => clap_complete::Shell::Bash,
     };
     let mut out = Vec::new();
-    clap_complete::generate(shell, &mut command, "secret-env", &mut out);
+    clap_complete::generate(shell, &mut command, "keysafe", &mut out);
     Ok(String::from_utf8(out)?)
 }
 
@@ -382,7 +382,7 @@ impl ExecCommand {
 
         // File secrets live only as long as the command
         let dir = tempfile::Builder::new()
-            .prefix("secret-env.")
+            .prefix("keysafe.")
             .tempdir()
             .context("failed to create file secret runtime directory")?;
         let runtime = RuntimeDir::new(Some(dir.path().to_path_buf()));
@@ -714,7 +714,7 @@ mod tests {
             "plain",
             "it's \"quoted\"",
             "multi\nline\n",
-            "$(touch /tmp/secret-env-pwned) `id` $HOME \\n",
+            "$(touch /tmp/keysafe-pwned) `id` $HOME \\n",
             "unicode ✓ 🔑",
         ];
         for value in values {
@@ -1083,7 +1083,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err().to_string(),
-            "'my-key' is an SSH key, which is not printed; use `secret-env load my-key` to add it to ssh-agent"
+            "'my-key' is an SSH key, which is not printed; use `keysafe load my-key` to add it to ssh-agent"
         );
         assert_eq!(writer.contents(), "");
     }
@@ -1251,8 +1251,8 @@ mod tests {
     fn assigned_runtime_dir(output: &str) -> Option<PathBuf> {
         output.lines().find_map(|line| {
             let value = line
-                .strip_prefix("typeset -g _SECRET_ENV_RUNTIME_DIR=")
-                .or_else(|| line.strip_prefix("_SECRET_ENV_RUNTIME_DIR="))?;
+                .strip_prefix("typeset -g _KEYSAFE_RUNTIME_DIR=")
+                .or_else(|| line.strip_prefix("_KEYSAFE_RUNTIME_DIR="))?;
             Some(PathBuf::from(value.trim_matches('\'')))
         })
     }
@@ -1282,15 +1282,15 @@ mod tests {
         let mut cmd = InitCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
-            bin: PathBuf::from("/opt/it's/secret-env"),
+            bin: PathBuf::from("/opt/it's/keysafe"),
         };
 
         cmd.execute(&init_args(&fixture, Shell::Zsh, false))?;
 
         let output = writer.contents();
-        assert!(output.contains("typeset -g _SECRET_ENV_BIN='/opt/it'\\''s/secret-env'\n"));
-        assert!(output.contains("\nsecret-env() {\n"));
-        assert!(output.contains("_secret-env() {"));
+        assert!(output.contains("typeset -g _KEYSAFE_BIN='/opt/it'\\''s/keysafe'\n"));
+        assert!(output.contains("\nkeysafe() {\n"));
+        assert!(output.contains("_keysafe() {"));
         assert!(!output.contains("{{"));
         assert!(output.contains("\nexport GITHUB_TOKEN='brown-fox'\n"));
 
@@ -1312,15 +1312,15 @@ mod tests {
         let mut cmd = InitCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
-            bin: PathBuf::from("/usr/local/bin/secret-env"),
+            bin: PathBuf::from("/usr/local/bin/keysafe"),
         };
 
         cmd.execute(&init_args(&fixture, Shell::Bash, false))?;
 
         let output = writer.contents();
-        assert!(output.contains("_SECRET_ENV_BIN='/usr/local/bin/secret-env'\n"));
-        assert!(output.contains("SECRET_ENV_EVAL=bash"));
-        assert!(output.contains("complete -F _secret__env"));
+        assert!(output.contains("_KEYSAFE_BIN='/usr/local/bin/keysafe'\n"));
+        assert!(output.contains("KEYSAFE_EVAL=bash"));
+        assert!(output.contains("complete -F _keysafe"));
         assert!(output.ends_with("export GITHUB_TOKEN='brown-fox'\n"));
         assert_eq!(assigned_runtime_dir(&output), None);
         Ok(())
@@ -1335,7 +1335,7 @@ mod tests {
         let mut cmd = InitCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
-            bin: PathBuf::from("secret-env"),
+            bin: PathBuf::from("keysafe"),
         };
 
         cmd.execute(&init_args(&fixture, Shell::Zsh, true))?;
@@ -1355,13 +1355,13 @@ mod tests {
         let mut cmd = InitCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
-            bin: PathBuf::from("secret-env"),
+            bin: PathBuf::from("keysafe"),
         };
 
         cmd.execute(&init_args(&fixture, Shell::Zsh, false))?;
 
         let output = writer.contents();
-        assert!(output.contains("\nsecret-env() {\n"));
+        assert!(output.contains("\nkeysafe() {\n"));
         assert!(!output.lines().any(|line| line.starts_with("export ")));
         Ok(())
     }
@@ -1374,12 +1374,12 @@ mod tests {
         let mut cmd = InitCommand {
             writer: Box::new(writer.clone()),
             loader: fixture.loader(offline()),
-            bin: PathBuf::from("secret-env"),
+            bin: PathBuf::from("keysafe"),
         };
 
         cmd.execute(&init_args(&fixture, Shell::Bash, false))?;
 
-        assert!(writer.contents().contains("\nsecret-env() {\n"));
+        assert!(writer.contents().contains("\nkeysafe() {\n"));
         Ok(())
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
         })?;
 
         let output = writer.contents();
-        assert!(output.starts_with("typeset -g _SECRET_ENV_RUNTIME_DIR='"));
+        assert!(output.starts_with("typeset -g _KEYSAFE_RUNTIME_DIR='"));
         let dir = assigned_runtime_dir(&output).unwrap();
         assert!(dir.join("files/personal/GCP_CREDENTIALS").exists());
         std::fs::remove_dir_all(dir)?;

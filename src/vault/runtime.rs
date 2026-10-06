@@ -39,7 +39,7 @@ impl RuntimeDir {
         }
 
         let dir = tempfile::Builder::new()
-            .prefix("secret-env.")
+            .prefix("keysafe.")
             .tempdir()
             .context("failed to create file secret runtime directory")?
             .keep();

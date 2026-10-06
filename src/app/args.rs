@@ -4,10 +4,10 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-/// Program is the main entry point for the secret-env CLI.
+/// Program is the main entry point for the keysafe CLI.
 #[derive(Debug, Parser)]
 #[command(
-    name = "secret-env",
+    name = "keysafe",
     about = "1Password secrets for your shell.",
     long_about = "Fetch secrets from 1Password, cache them in the system keychain, export them into your shell, and add SSH keys to ssh-agent.",
     version
@@ -21,10 +21,10 @@ pub struct Program {
 /// ProgramArgs holds the shared global flags available to every subcommand.
 #[derive(Debug, Args)]
 pub struct ProgramArgs {
-    /// Path to the secret-env configuration file.
+    /// Path to the keysafe configuration file.
     #[arg(
         help = "Config file path.",
-        env = "SECRET_ENV_CONFIG_FILE",
+        env = "KEYSAFE_CONFIG_FILE",
         default_value_os_t = default_config(),
         long,
         short
@@ -34,7 +34,7 @@ pub struct ProgramArgs {
     /// Path to the directory recording which profiles were loaded.
     #[arg(
         help = "State directory path.",
-        env = "SECRET_ENV_STATE_DIR",
+        env = "KEYSAFE_STATE_DIR",
         default_value_os_t = default_state_dir(),
         long
     )]
@@ -51,7 +51,7 @@ impl Default for ProgramArgs {
 }
 
 impl ProgramArgs {
-    /// Falls back to the config file used before secret-env had its own name (and by zsh-op)
+    /// Falls back to the config file used before keysafe had its own name (and by zsh-op)
     /// when the default one does not exist yet. Returns the config file that is now used, if
     /// it changed.
     pub fn use_legacy_config(&mut self) -> Option<&Path> {
@@ -64,7 +64,7 @@ impl ProgramArgs {
         Some(&self.config)
     }
 
-    /// Returns the state directory used before secret-env had its own name, which is still
+    /// Returns the state directory used before keysafe had its own name, which is still
     /// read when the default state directory is in use.
     pub fn legacy_state_dir(&self) -> Option<PathBuf> {
         (self.state_dir == default_state_dir()).then(|| home_dir().join(".cache/op"))
@@ -85,17 +85,17 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| home_dir().join(fallback))
 }
 
-/// Returns the default config file: `$XDG_CONFIG_HOME/secret-env/config.yml`.
+/// Returns the default config file: `$XDG_CONFIG_HOME/keysafe/config.yml`.
 pub fn default_config() -> PathBuf {
-    xdg_dir("XDG_CONFIG_HOME", ".config").join("secret-env/config.yml")
+    xdg_dir("XDG_CONFIG_HOME", ".config").join("keysafe/config.yml")
 }
 
-/// Returns the default state directory: `$XDG_STATE_HOME/secret-env`.
+/// Returns the default state directory: `$XDG_STATE_HOME/keysafe`.
 pub fn default_state_dir() -> PathBuf {
-    xdg_dir("XDG_STATE_HOME", ".local/state").join("secret-env")
+    xdg_dir("XDG_STATE_HOME", ".local/state").join("keysafe")
 }
 
-/// Returns the config file used before secret-env had its own name.
+/// Returns the config file used before keysafe had its own name.
 fn legacy_config() -> PathBuf {
     home_dir().join(".config/op/config.yml")
 }
@@ -107,7 +107,7 @@ pub enum ProgramCommand {
     #[command(
         name = "load",
         about = "Load secrets of a profile into the current shell.",
-        long_about = "Export environment secrets, write file secrets and export their paths, and add SSH keys to ssh-agent. Without names, every secret of the profile is loaded and the profile is recorded, so its cached secrets are exported in new shells. Needs the shell integration (`secret-env init`); otherwise, evaluate the printed statements yourself.",
+        long_about = "Export environment secrets, write file secrets and export their paths, and add SSH keys to ssh-agent. Without names, every secret of the profile is loaded and the profile is recorded, so its cached secrets are exported in new shells. Needs the shell integration (`keysafe init`); otherwise, evaluate the printed statements yourself.",
         next_display_order = 1
     )]
     Load(LoadCommandArgs),
@@ -151,7 +151,7 @@ pub enum ProgramCommand {
     #[command(
         name = "init",
         about = "Print the shell integration script for zsh or bash.",
-        long_about = "Print a script that defines the `secret-env` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(secret-env init zsh)\"` to ~/.zshrc, or `eval \"$(secret-env init bash)\"` to ~/.bashrc.",
+        long_about = "Print a script that defines the `keysafe` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `eval \"$(keysafe init bash)\"` to ~/.bashrc.",
         next_display_order = 6
     )]
     Init(InitCommandArgs),
@@ -277,14 +277,14 @@ pub struct OutputArgs {
     /// A new private temporary directory is created if not provided.
     #[arg(
         help = "Directory for file secrets (a new temporary one if not provided).",
-        env = "SECRET_ENV_RUNTIME_DIR",
+        env = "KEYSAFE_RUNTIME_DIR",
         long
     )]
     pub runtime_dir: Option<PathBuf>,
 
     /// Shell whose integration function runs this command and evaluates its statements.
     /// Set by the script that `init` prints; not meant to be set by hand.
-    #[arg(long, env = "SECRET_ENV_EVAL", hide = true)]
+    #[arg(long, env = "KEYSAFE_EVAL", hide = true)]
     pub eval: Option<Shell>,
 }
 
@@ -325,7 +325,7 @@ pub struct LoadCommandArgs {
     /// Profile the secrets belong to.
     #[arg(
         help = "Profile name.",
-        env = "SECRET_ENV_DEFAULT_PROFILE",
+        env = "KEYSAFE_DEFAULT_PROFILE",
         default_value = "personal",
         long,
         short
@@ -364,7 +364,7 @@ pub struct ReadCommandArgs {
     /// Profile the secret belongs to.
     #[arg(
         help = "Profile name.",
-        env = "SECRET_ENV_DEFAULT_PROFILE",
+        env = "KEYSAFE_DEFAULT_PROFILE",
         default_value = "personal",
         long,
         short
@@ -426,7 +426,7 @@ pub struct ExportCommandArgs {
     /// Profile to export.
     #[arg(
         help = "Profile name.",
-        env = "SECRET_ENV_DEFAULT_PROFILE",
+        env = "KEYSAFE_DEFAULT_PROFILE",
         default_value = "personal",
         long,
         short
@@ -464,7 +464,7 @@ pub struct ExecCommandArgs {
     /// Profile whose secrets are applied.
     #[arg(
         help = "Profile name.",
-        env = "SECRET_ENV_DEFAULT_PROFILE",
+        env = "KEYSAFE_DEFAULT_PROFILE",
         default_value = "personal",
         long,
         short
@@ -549,26 +549,25 @@ mod tests {
 
     #[test]
     fn init_parses_shell() {
-        let program =
-            Program::try_parse_from(["secret-env", "init", "bash", "--no-export"]).unwrap();
+        let program = Program::try_parse_from(["keysafe", "init", "bash", "--no-export"]).unwrap();
         let ProgramCommand::Init(args) = program.command else {
             panic!("expected the init command");
         };
         assert_eq!(args.shell, Shell::Bash);
         assert!(args.no_export);
-        assert!(Program::try_parse_from(["secret-env", "init", "fish"]).is_err());
+        assert!(Program::try_parse_from(["keysafe", "init", "fish"]).is_err());
     }
 
     #[test]
     fn export_rejects_cached_with_refresh() {
-        let result = Program::try_parse_from(["secret-env", "export", "--cached", "--refresh"]);
+        let result = Program::try_parse_from(["keysafe", "export", "--cached", "--refresh"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn load_parses_names_and_flags() {
         let program = Program::try_parse_from([
-            "secret-env",
+            "keysafe",
             "load",
             "-p",
             "work",
@@ -588,7 +587,7 @@ mod tests {
 
     #[test]
     fn load_without_names_loads_the_profile() {
-        let program = Program::try_parse_from(["secret-env", "load", "-p", "work"]).unwrap();
+        let program = Program::try_parse_from(["keysafe", "load", "-p", "work"]).unwrap();
         let ProgramCommand::Load(args) = program.command else {
             panic!("expected the load command");
         };
@@ -597,15 +596,9 @@ mod tests {
 
     #[test]
     fn profile_subcommands_take_the_profile_as_argument() {
-        let mut program = Program::try_parse_from([
-            "secret-env",
-            "profile",
-            "clear",
-            "work",
-            "--state-dir",
-            "/s",
-        ])
-        .unwrap();
+        let mut program =
+            Program::try_parse_from(["keysafe", "profile", "clear", "work", "--state-dir", "/s"])
+                .unwrap();
         assert_eq!(program.command.parent_mut().state_dir, Path::new("/s"));
         let ProgramCommand::Profile(ProfileCommandArgs {
             command: ProfileCommand::Clear(args),
@@ -616,7 +609,7 @@ mod tests {
         assert_eq!(args.profile, "work");
 
         // Clearing needs an explicit profile
-        assert!(Program::try_parse_from(["secret-env", "profile", "clear"]).is_err());
+        assert!(Program::try_parse_from(["keysafe", "profile", "clear"]).is_err());
     }
 
     #[test]

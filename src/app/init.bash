@@ -1,20 +1,20 @@
-# secret-env shell integration for bash
+# keysafe shell integration for bash
 #
 # Add to ~/.bashrc:
 #
-#   eval "$(secret-env init bash)"
+#   eval "$(keysafe init bash)"
 
-_SECRET_ENV_BIN={{bin}}
+_KEYSAFE_BIN={{bin}}
 
 # Wrap the binary, so that `load` and `export` change the current shell. The
 # binary writes the shell statements to fd 3, which is captured and
 # evaluated; everything else (values, JSON, help, errors) goes straight to
 # the terminal.
-secret-env() {
+keysafe() {
     case "$1" in
     load | export) ;;
     *)
-        command "$_SECRET_ENV_BIN" "$@"
+        command "$_KEYSAFE_BIN" "$@"
         return
         ;;
     esac
@@ -24,9 +24,9 @@ secret-env() {
     local statements rc
     {
         statements="$(
-            [[ -n "${_SECRET_ENV_RUNTIME_DIR-}" ]] &&
-                export SECRET_ENV_RUNTIME_DIR="$_SECRET_ENV_RUNTIME_DIR"
-            SECRET_ENV_EVAL=bash command "$_SECRET_ENV_BIN" "$@" 3>&1 1>&4 4>&-
+            [[ -n "${_KEYSAFE_RUNTIME_DIR-}" ]] &&
+                export KEYSAFE_RUNTIME_DIR="$_KEYSAFE_RUNTIME_DIR"
+            KEYSAFE_EVAL=bash command "$_KEYSAFE_BIN" "$@" 3>&1 1>&4 4>&-
         )"
         rc=$?
     } 4>&1
@@ -37,26 +37,26 @@ secret-env() {
 
 # Remove the file secrets of this shell when it exits. The directory is not
 # exported, so child shells create (and remove) their own.
-_secret_env_cleanup() {
-    [[ -n "${_SECRET_ENV_RUNTIME_DIR-}" ]] || return 0
+_keysafe_cleanup() {
+    [[ -n "${_KEYSAFE_RUNTIME_DIR-}" ]] || return 0
 
-    rm -rf -- "$_SECRET_ENV_RUNTIME_DIR"
-    unset _SECRET_ENV_RUNTIME_DIR
+    rm -rf -- "$_KEYSAFE_RUNTIME_DIR"
+    unset _KEYSAFE_RUNTIME_DIR
 }
 
 # bash has a single EXIT trap, so run the cleanup before the one that is
 # already set instead of replacing it.
-_secret_env_trap() {
+_keysafe_trap() {
     eval "set -- $(trap -p EXIT)"
     local previous="${3-}"
 
     case "$previous" in
-    *_secret_env_cleanup*) ;;
-    *) trap -- "_secret_env_cleanup${previous:+; $previous}" EXIT ;;
+    *_keysafe_cleanup*) ;;
+    *) trap -- "_keysafe_cleanup${previous:+; $previous}" EXIT ;;
     esac
 }
 
-_secret_env_trap
+_keysafe_trap
 
 # Completions, generated from the command line definition and the profiles
 # and secrets in the config. Builds of bash without readline, like the

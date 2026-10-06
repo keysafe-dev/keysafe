@@ -79,10 +79,10 @@ jobs:
 
       - name: Prepare Release Assets
         run: |
-          mkdir -p release && install -m 0755 result/bin/secret-env release/secret-env-${{ matrix.nix_system }}
+          mkdir -p release && install -m 0755 result/bin/keysafe release/keysafe-${{ matrix.nix_system }}
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag_name }}
-          files: release/secret-env-${{ matrix.nix_system }}
+          files: release/keysafe-${{ matrix.nix_system }}

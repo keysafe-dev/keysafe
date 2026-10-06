@@ -1,5 +1,5 @@
 {
-  description = "secret-env - load 1Password secrets into your shell, cached in the system keychain";
+  description = "keysafe - load 1Password secrets into your shell, cached in the system keychain";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

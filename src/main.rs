@@ -21,16 +21,16 @@ fn main() -> ExitCode {
     let mut program = Program::parse();
     // The shell integration passes these to this process only; commands it runs, like the
     // one `exec` starts, must not inherit them.
-    std::env::remove_var("SECRET_ENV_EVAL");
-    std::env::remove_var("SECRET_ENV_RUNTIME_DIR");
+    std::env::remove_var("KEYSAFE_EVAL");
+    std::env::remove_var("KEYSAFE_RUNTIME_DIR");
 
-    // Keep working with the config used before secret-env had its own name. The hint is
+    // Keep working with the config used before keysafe had its own name. The hint is
     // left out of `init`, which runs on every shell start.
     let init = matches!(program.command, ProgramCommand::Init(_));
     if let Some(legacy) = program.command.parent_mut().use_legacy_config() {
         if !init {
             info(format!(
-                "using {}; move it to {} (or set SECRET_ENV_CONFIG_FILE)",
+                "using {}; move it to {} (or set KEYSAFE_CONFIG_FILE)",
                 legacy.display(),
                 default_config().display()
             ));
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
     match run(program) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("secret-env: error: {err:#}");
+            eprintln!("keysafe: error: {err:#}");
             ExitCode::FAILURE
         }
     }
@@ -98,7 +98,7 @@ fn run(program: Program) -> Result<ExitCode> {
         ProgramCommand::Init(args) => {
             let writer = Box::new(std::io::stdout());
             let loader = loader(&args.parent);
-            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("secret-env"));
+            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("keysafe"));
             let mut command = InitCommand {
                 writer,
                 loader,
