@@ -350,6 +350,16 @@ fn init_function_tells_status_the_integration_is_active() {
 }
 
 #[test]
+fn init_function_unloads_secrets() {
+    let dir = workspace(CONFIG);
+    for shell in ["zsh", "bash"] {
+        let script = "export GITHUB_TOKEN=x\nkeysafe unload GITHUB_TOKEN; echo \"rc=$? token=${GITHUB_TOKEN-unset}\"";
+        let output = with_init(shell, dir.path(), script);
+        assert_eq!(stdout(&output), "rc=0 token=unset\n", "{shell}");
+    }
+}
+
+#[test]
 fn init_function_passes_other_commands_through() {
     let dir = workspace(CONFIG);
     for shell in ["zsh", "bash"] {

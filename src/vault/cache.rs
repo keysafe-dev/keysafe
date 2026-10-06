@@ -233,7 +233,14 @@ impl Cache {
             count += usize::from(deleted);
         }
 
-        for path in self.metadata_paths(&account.name) {
+        self.forget(&account.name)?;
+        Ok(count)
+    }
+
+    /// Forgets that `profile` was loaded, so it is no longer exported in new shells. Its
+    /// cached secrets stay.
+    pub fn forget(&self, profile: &str) -> Result<()> {
+        for path in self.metadata_paths(profile) {
             match std::fs::remove_file(&path) {
                 Err(e) if e.kind() != ErrorKind::NotFound => {
                     return Err(e).context(format!("failed to remove {}", path.display()));
@@ -241,7 +248,7 @@ impl Cache {
                 _ => {}
             }
         }
-        Ok(count)
+        Ok(())
     }
 }
 
@@ -254,6 +261,9 @@ pub struct KeyRecord {
     pub name: String,
     /// SHA256 fingerprint, as printed by `ssh-add -l`.
     pub fingerprint: String,
+    /// OpenSSH public key, used to remove the key from the agent.
+    #[serde(default)]
+    pub public_key: String,
     /// When the agent drops the key, in seconds since the Unix epoch.
     pub expires: u64,
 }
@@ -284,11 +294,25 @@ impl Cache {
             .filter(|k| k.expires > now && !added.iter().any(|a| a.fingerprint == k.fingerprint))
             .collect();
         keys.extend_from_slice(added);
+        self.write_keys(&keys)
+    }
 
+    /// Drops the records of the SSH keys with the given `fingerprints`.
+    pub fn drop_keys(&self, fingerprints: &[String]) -> Result<()> {
+        let keys: Vec<KeyRecord> = self
+            .keys()?
+            .into_iter()
+            .filter(|k| !fingerprints.contains(&k.fingerprint))
+            .collect();
+        self.write_keys(&keys)
+    }
+
+    /// Replaces the recorded SSH keys with `keys`.
+    fn write_keys(&self, keys: &[KeyRecord]) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("failed to create {}", self.dir.display()))?;
         let path = self.keys_path();
-        std::fs::write(&path, serde_json::to_string_pretty(&keys)?)
+        std::fs::write(&path, serde_json::to_string_pretty(keys)?)
             .with_context(|| format!("failed to write {}", path.display()))
     }
 }
@@ -387,6 +411,7 @@ mod tests {
             profile: "work".into(),
             name: name.into(),
             fingerprint: fingerprint.into(),
+            public_key: String::new(),
             expires,
         };
         assert_eq!(cache.keys().unwrap(), vec![]);
@@ -406,6 +431,32 @@ mod tests {
 
         // "old" expired, "kept" was replaced by the new record of the same key
         assert_eq!(cache.keys().unwrap(), vec![record("new", "SHA256:b", 900)]);
+    }
+
+    #[test]
+    fn forget_and_drop_keys_keep_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::with(&[("keysafe.personal", "GITHUB_TOKEN", "a")]);
+        let cache = Cache::new(Box::new(store.clone()), dir.path());
+        cache.save(&account()).unwrap();
+        let record = KeyRecord {
+            profile: "personal".into(),
+            name: "my-key".into(),
+            fingerprint: "SHA256:a".into(),
+            public_key: "ssh-ed25519 AAAA".into(),
+            expires: 900,
+        };
+        cache.record_keys(&[record], 0).unwrap();
+
+        cache.forget("personal").unwrap();
+        cache.drop_keys(&["SHA256:a".into()]).unwrap();
+
+        assert_eq!(cache.loaded("personal").unwrap(), None);
+        assert_eq!(cache.keys().unwrap(), vec![]);
+        assert_eq!(
+            store.value("keysafe.personal", "GITHUB_TOKEN").as_deref(),
+            Some("a")
+        );
     }
 
     #[test]

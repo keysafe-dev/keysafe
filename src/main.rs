@@ -61,6 +61,19 @@ fn run(program: Program) -> Result<ExitCode> {
             };
             command.execute(&args)?
         }
+        ProgramCommand::Unload(args) => {
+            let writer = statements(&args.output);
+            let cache = cache(&args.parent);
+            let agent = Box::new(Agent::new());
+            let environment = std::env::vars().collect();
+            let mut command = UnloadCommand {
+                writer,
+                cache,
+                agent,
+                environment,
+            };
+            command.execute(&args)?
+        }
         ProgramCommand::Read(args) => {
             let writer = Box::new(std::io::stdout());
             let loader = loader(&args.parent);

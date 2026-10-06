@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::log::warn;
 use crate::vault::{
-    fingerprint, Cache, KeyAgent, Profile, RuntimeDir, Secret, SecretClient, SecretKind,
+    fingerprint, public_key, Cache, KeyAgent, Profile, RuntimeDir, Secret, SecretClient, SecretKind,
 };
 
 /// Source decides where secret values may come from.
@@ -23,11 +23,21 @@ pub struct Variable {
     pub value: String,
 }
 
+/// An SSH key [`Loader::add_key`] added to the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedKey {
+    /// SHA256 fingerprint, as printed by `ssh-add -l`.
+    pub fingerprint: String,
+    /// OpenSSH public key, which is enough to remove the key from the agent again.
+    pub public_key: String,
+}
+
 /// What [`Loader::add_key`] did with an SSH key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyOutcome {
-    /// The key was added to the agent, with its fingerprint if it could be computed.
-    Added(Option<String>),
+    /// The key was added to the agent, with its fingerprint and public key if the private
+    /// key could be parsed.
+    Added(Option<AddedKey>),
     /// The agent already held the key, so it was left alone.
     Present,
 }
@@ -112,13 +122,24 @@ impl Loader {
         refresh: bool,
     ) -> Result<KeyOutcome> {
         let key = self.load(account, secret, refresh)?;
-        let fingerprint = fingerprint(&key).ok();
+        let added =
+            fingerprint(&key)
+                .ok()
+                .zip(public_key(&key).ok())
+                .map(|(fingerprint, public_key)| AddedKey {
+                    fingerprint,
+                    public_key,
+                });
         // Re-adding a key resets its lifetime, so only do it when a refresh was requested.
-        if !refresh && fingerprint.as_ref().is_some_and(|f| present.contains(f)) {
+        if !refresh
+            && added
+                .as_ref()
+                .is_some_and(|k| present.contains(&k.fingerprint))
+        {
             return Ok(KeyOutcome::Present);
         }
 
         agent.add(&key, lifetime)?;
-        Ok(KeyOutcome::Added(fingerprint))
+        Ok(KeyOutcome::Added(added))
     }
 }

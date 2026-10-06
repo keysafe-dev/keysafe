@@ -15,6 +15,8 @@ pub trait KeyAgent {
     /// Adds the OpenSSH private `key` to the agent for the given `lifetime` (e.g. 1h).
     /// Adding a key the agent already holds resets its lifetime.
     fn add(&self, key: &str, lifetime: &str) -> Result<()>;
+    /// Removes the key with the OpenSSH `public_key` from the agent.
+    fn remove(&self, public_key: &str) -> Result<()>;
 }
 
 /// Agent talks to the running ssh-agent through `ssh-add`.
@@ -75,6 +77,27 @@ impl KeyAgent for Agent {
         }
         Ok(())
     }
+
+    fn remove(&self, public_key: &str) -> Result<()> {
+        // `ssh-add -d` takes key files; the public key is enough, and it is not secret.
+        let dir = tempfile::tempdir().context("failed to create a temporary directory")?;
+        let path = dir.path().join("key.pub");
+        std::fs::write(&path, format!("{}\n", public_key.trim_end()))?;
+
+        let output = Command::new("ssh-add")
+            .arg("-d")
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .context("failed to run ssh-add; is OpenSSH installed?")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("failed to remove SSH key from agent: {}", stderr.trim());
+        }
+        Ok(())
+    }
 }
 
 /// Returns the number of seconds in an ssh-agent `lifetime`, in the format `ssh-add -t`
@@ -112,6 +135,12 @@ pub fn lifetime_seconds(lifetime: &str) -> Result<u64> {
         bail!("invalid SSH key expiration time: {lifetime}");
     }
     Ok(total)
+}
+
+/// Returns the OpenSSH public key of an OpenSSH private key.
+pub fn public_key(key: &str) -> Result<String> {
+    let key = ssh_key::PrivateKey::from_openssh(key).context("invalid OpenSSH private key")?;
+    Ok(key.public_key().to_openssh()?)
 }
 
 /// Returns the SHA256 fingerprint of an OpenSSH private key, as printed by `ssh-add -l`.
@@ -156,13 +185,15 @@ mod tests {
 
     #[test]
     #[ignore = "talks to the ssh-agent at $SSH_AUTH_SOCK"]
-    fn agent_adds_key_from_stdin() {
+    fn agent_adds_and_removes_keys() {
         let agent = Agent::new();
+        let expected = fingerprint(&TEST_KEY).unwrap();
+
         agent.add(&TEST_KEY, "1m").unwrap();
-        assert!(agent
-            .fingerprints()
-            .unwrap()
-            .contains(&fingerprint(&TEST_KEY).unwrap()));
+        assert!(agent.fingerprints().unwrap().contains(&expected));
+
+        agent.remove(&public_key(&TEST_KEY).unwrap()).unwrap();
+        assert!(!agent.fingerprints().unwrap().contains(&expected));
     }
 
     #[test]

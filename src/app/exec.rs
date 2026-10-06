@@ -169,13 +169,14 @@ impl LoadCommand {
                 &args.expiration,
                 args.refresh,
             ) {
-                Ok(KeyOutcome::Added(fingerprint)) => {
+                Ok(KeyOutcome::Added(added_key)) => {
                     added += 1;
-                    if let (Some(fingerprint), Some(lifetime)) = (fingerprint, lifetime) {
+                    if let (Some(added_key), Some(lifetime)) = (added_key, lifetime) {
                         records.push(KeyRecord {
                             profile: account.name.clone(),
                             name: key.name.clone(),
-                            fingerprint,
+                            fingerprint: added_key.fingerprint,
+                            public_key: added_key.public_key,
                             expires: now + lifetime,
                         });
                     }
@@ -207,6 +208,136 @@ impl LoadCommand {
             }
         }
         failed
+    }
+}
+
+/// Unload secrets of a profile from the current shell.
+pub struct UnloadCommand {
+    /// Writer used to output the shell statements.
+    pub writer: Box<dyn Write>,
+    /// Cache holding the profile records and the SSH keys keysafe added.
+    pub cache: Cache,
+    /// Agent the SSH keys are removed from.
+    pub agent: Box<dyn KeyAgent>,
+    /// Environment of the shell keysafe runs in.
+    pub environment: HashMap<String, String>,
+}
+
+impl UnloadCommand {
+    /// Execute the UnloadCommand with the provided arguments.
+    pub fn execute(&mut self, args: &UnloadCommandArgs) -> Result<()> {
+        let config = Config::read_from_file(&args.parent.config)?;
+        let profile = config.resolve(args.profile.as_deref())?;
+        let secrets: Vec<&Secret> = if args.names.is_empty() {
+            profile.secrets.iter().collect()
+        } else {
+            args.names
+                .iter()
+                .map(|name| profile.secret(name))
+                .collect::<Result<_>>()?
+        };
+        if args.output.export_format() == ExportFormat::Json {
+            bail!("unload prints shell statements; use --format zsh or --format bash");
+        }
+
+        // Unset the variables, deleting the files of file secrets keysafe wrote
+        let variables: Vec<&Secret> = secrets
+            .iter()
+            .copied()
+            .filter(|s| s.is_variable())
+            .collect();
+        for secret in &variables {
+            if secret.kind == SecretKind::File {
+                self.remove_file(profile, secret);
+            }
+            writeln!(self.writer, "unset {}", secret.name)?;
+        }
+
+        // Remove the SSH keys keysafe added from the agent
+        let keys: Vec<&Secret> = secrets
+            .iter()
+            .copied()
+            .filter(|s| s.kind == SecretKind::Ssh)
+            .collect();
+        let (removed, failed) = self.remove_keys(profile, &keys);
+
+        // An unloaded profile is no longer exported in new shells; its cache stays
+        if args.names.is_empty() {
+            self.cache.forget(&profile.name)?;
+        }
+
+        info(format!(
+            "unloaded {} variable(s) and {removed} SSH key(s) of profile '{}'",
+            variables.len(),
+            profile.name
+        ));
+        finish(failed)
+    }
+
+    /// Deletes the file of the file secret `secret`, if its variable points to a file that
+    /// keysafe wrote (`<runtime dir>/files/<profile>/<name>`).
+    fn remove_file(&self, profile: &Profile, secret: &Secret) {
+        let Some(value) = self.environment.get(&secret.name) else {
+            return;
+        };
+        let path = Path::new(value);
+        let written = Path::new("files").join(&profile.name).join(&secret.name);
+        if path.ends_with(&written) {
+            if let Err(err) = std::fs::remove_file(path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    warn(format!("failed to remove {}: {err}", path.display()));
+                }
+            }
+        }
+    }
+
+    /// Removes `keys` from the agent, if keysafe added them and the agent still holds them.
+    /// Returns the number of removed keys and of failures.
+    fn remove_keys(&self, profile: &Profile, keys: &[&Secret]) -> (usize, usize) {
+        if keys.is_empty() {
+            return (0, 0);
+        }
+        // Without a running agent, there is nothing to remove
+        let Ok(present) = self.agent.fingerprints() else {
+            return (0, 0);
+        };
+        let records = match self.cache.keys() {
+            Ok(records) => records,
+            Err(err) => {
+                warn(format!("{err:#}"));
+                return (0, keys.len());
+            }
+        };
+
+        let (mut removed, mut failed) = (Vec::new(), 0);
+        for key in keys {
+            let Some(record) = records.iter().find(|r| {
+                r.profile == profile.name && r.name == key.name && present.contains(&r.fingerprint)
+            }) else {
+                continue;
+            };
+            if record.public_key.is_empty() {
+                warn(format!(
+                    "SSH key '{}' was added by an older keysafe; remove it with `ssh-add -d`",
+                    key.name
+                ));
+                continue;
+            }
+            match self.agent.remove(&record.public_key) {
+                Ok(()) => removed.push(record.fingerprint.clone()),
+                Err(err) => {
+                    warn(format!("failed to remove SSH key '{}': {err:#}", key.name));
+                    failed += 1;
+                }
+            }
+        }
+
+        if !removed.is_empty() {
+            if let Err(err) = self.cache.drop_keys(&removed) {
+                warn(format!("{err:#}"));
+            }
+        }
+        (removed.len(), failed)
     }
 }
 
@@ -1633,6 +1764,7 @@ mod tests {
             ("personal", "my-key")
         );
         assert_eq!(keys[0].fingerprint, fingerprint(&TEST_KEY)?);
+        assert_eq!(keys[0].public_key, public_key(&TEST_KEY)?);
         assert!((before + 3600..=unix_now() + 3600).contains(&keys[0].expires));
         Ok(())
     }
@@ -1672,6 +1804,7 @@ mod tests {
                 profile: "personal".into(),
                 name: "my-key".into(),
                 fingerprint: key.clone(),
+                public_key: public_key(&TEST_KEY)?,
                 expires: 1_000 + 45 * 60,
             }],
             1_000,
@@ -1745,6 +1878,142 @@ mod tests {
         assert!(output.contains("    my-key           SSH agent not running\n"));
         assert!(!output.contains("Profile: work"));
         Ok(())
+    }
+
+    fn unload(
+        fixture: &Fixture,
+        agent: MockKeyAgent,
+        environment: &[(&str, &str)],
+    ) -> UnloadCommand {
+        UnloadCommand {
+            writer: Box::new(Writer::new()),
+            cache: fixture.cache(),
+            agent: Box::new(agent),
+            environment: environment
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn unload_args(fixture: &Fixture, names: &[&str]) -> UnloadCommandArgs {
+        UnloadCommandArgs {
+            parent: fixture.parent(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+            profile: None,
+            output: fixture.output(ExportFormat::Zsh),
+        }
+    }
+
+    #[test]
+    fn unload_unsets_variables_and_deletes_the_files_it_wrote() -> Result<()> {
+        let fixture = Fixture::new().loaded("personal", "env:GITHUB_TOKEN\n");
+        let file = RuntimeDir::new(Some(fixture.runtime_dir())).write(
+            "personal",
+            "GCP_CREDENTIALS",
+            "{}",
+        )?;
+        let writer = Writer::new();
+        let mut cmd = UnloadCommand {
+            writer: Box::new(writer.clone()),
+            ..unload(
+                &fixture,
+                agent(vec![]),
+                &[
+                    ("GITHUB_TOKEN", "x"),
+                    ("GCP_CREDENTIALS", &file.to_string_lossy()),
+                ],
+            )
+        };
+
+        cmd.execute(&unload_args(&fixture, &[]))?;
+
+        assert_eq!(
+            writer.contents(),
+            "unset GITHUB_TOKEN\nunset GCP_CREDENTIALS\n"
+        );
+        assert!(!file.exists());
+        // The whole profile was unloaded, so new shells no longer get it
+        assert_eq!(fixture.cache().loaded("personal")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn unload_leaves_files_it_did_not_write() -> Result<()> {
+        let fixture = Fixture::new();
+        let other = fixture.dir.path().join("credentials.json");
+        std::fs::write(&other, "{}")?;
+        let mut cmd = unload(
+            &fixture,
+            MockKeyAgent::new(),
+            &[("GCP_CREDENTIALS", &other.to_string_lossy())],
+        );
+
+        cmd.execute(&unload_args(&fixture, &["GCP_CREDENTIALS"]))?;
+
+        assert!(other.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unload_named_secrets_keeps_the_profile_exported() -> Result<()> {
+        let fixture = Fixture::new().loaded("personal", "env:GITHUB_TOKEN\n");
+        let writer = Writer::new();
+        let mut cmd = UnloadCommand {
+            writer: Box::new(writer.clone()),
+            ..unload(&fixture, MockKeyAgent::new(), &[])
+        };
+
+        cmd.execute(&unload_args(&fixture, &["GITHUB_TOKEN"]))?;
+
+        assert_eq!(writer.contents(), "unset GITHUB_TOKEN\n");
+        assert!(fixture.cache().loaded("personal")?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn unload_removes_the_keys_it_added() -> Result<()> {
+        let fixture = Fixture::new();
+        let key = fingerprint(&TEST_KEY)?;
+        let public = public_key(&TEST_KEY)?;
+        fixture.cache().record_keys(
+            &[KeyRecord {
+                profile: "personal".into(),
+                name: "my-key".into(),
+                fingerprint: key.clone(),
+                public_key: public.clone(),
+                expires: u64::MAX,
+            }],
+            0,
+        )?;
+        let mut agent = agent(vec![key]);
+        agent
+            .expect_remove()
+            .withf(move |k| k == public)
+            .times(1)
+            .returning(|_| Ok(()));
+        let mut cmd = unload(&fixture, agent, &[]);
+
+        cmd.execute(&unload_args(&fixture, &["my-key"]))?;
+
+        assert_eq!(fixture.cache().keys()?, vec![]);
+        Ok(())
+    }
+
+    #[test]
+    fn unload_rejects_json() {
+        let fixture = Fixture::new();
+        let mut cmd = unload(&fixture, MockKeyAgent::new(), &[]);
+
+        let result = cmd.execute(&UnloadCommandArgs {
+            output: fixture.output(ExportFormat::Json),
+            ..unload_args(&fixture, &["GITHUB_TOKEN"])
+        });
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "unload prints shell statements; use --format zsh or --format bash"
+        );
     }
 
     #[test]

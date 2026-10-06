@@ -112,12 +112,21 @@ pub enum ProgramCommand {
     )]
     Load(LoadCommandArgs),
 
+    /// Unload secrets of a profile from the current shell.
+    #[command(
+        name = "unload",
+        about = "Unload secrets of a profile from the current shell.",
+        long_about = "Undo `load`: unset the environment variables, delete the files of file secrets, and remove the SSH keys keysafe added from ssh-agent. Without names, the whole profile is unloaded and no longer exported in new shells. Its cached secrets stay; use `profile clear` to delete them. Needs the shell integration (`keysafe init`); otherwise, evaluate the printed statements yourself.",
+        next_display_order = 2
+    )]
+    Unload(UnloadCommandArgs),
+
     /// Print the value of a secret.
     #[command(
         name = "read",
         about = "Print the value of a secret.",
         long_about = "Print the value of an environment or file secret, from the keychain cache or 1Password. SSH keys are not printed; use `load` to add them to ssh-agent.",
-        next_display_order = 2
+        next_display_order = 3
     )]
     Read(ReadCommandArgs),
 
@@ -126,7 +135,7 @@ pub enum ProgramCommand {
         name = "export",
         about = "Export the environment and file secrets of a profile as shell statements.",
         long_about = "Emit shell-ready export statements (or JSON) for the environment and file secrets of a profile. With --cached, only secrets of previously loaded profiles are read from the keychain and 1Password is never contacted.",
-        next_display_order = 3
+        next_display_order = 4
     )]
     Export(ExportCommandArgs),
 
@@ -135,7 +144,7 @@ pub enum ProgramCommand {
         name = "exec",
         about = "Execute a command with the secrets of a profile in its environment.",
         long_about = "Resolve the environment and file secrets of a profile, then run the given command with them in its environment. File secrets are removed once the command exits.",
-        next_display_order = 4
+        next_display_order = 5
     )]
     Exec(ExecCommandArgs),
 
@@ -144,7 +153,7 @@ pub enum ProgramCommand {
         name = "status",
         about = "Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.",
         long_about = "Show, for each profile, which of its variables are set in this shell, which of its SSH keys are in ssh-agent and when they expire, and whether its cached secrets are exported in new shells. Secret values are never printed.",
-        next_display_order = 5
+        next_display_order = 6
     )]
     Status(StatusCommandArgs),
 
@@ -152,7 +161,7 @@ pub enum ProgramCommand {
     #[command(
         name = "profile",
         about = "List, show and clear profiles.",
-        next_display_order = 6
+        next_display_order = 7
     )]
     Profile(ProfileCommandArgs),
 
@@ -161,7 +170,7 @@ pub enum ProgramCommand {
         name = "init",
         about = "Print the shell integration script for zsh or bash.",
         long_about = "Print a script that defines the `keysafe` shell function, which applies `load` and `export` to the current shell, along with completions. It also exports the cached secrets of loaded profiles. Add `eval \"$(keysafe init zsh)\"` to ~/.zshrc, or `eval \"$(keysafe init bash)\"` to ~/.bashrc.",
-        next_display_order = 7
+        next_display_order = 8
     )]
     Init(InitCommandArgs),
 }
@@ -171,6 +180,7 @@ impl ProgramCommand {
     pub fn parent_mut(&mut self) -> &mut ProgramArgs {
         match self {
             Self::Load(args) => &mut args.parent,
+            Self::Unload(args) => &mut args.parent,
             Self::Read(args) => &mut args.parent,
             Self::Export(args) => &mut args.parent,
             Self::Exec(args) => &mut args.parent,
@@ -362,6 +372,31 @@ pub struct LoadCommandArgs {
     /// Bypass the keychain cache and fetch the secrets from 1Password.
     #[arg(help = "Force refresh from 1Password.", long, short)]
     pub refresh: bool,
+
+    /// Output flags.
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+/// UnloadCommandArgs defines the arguments for the UnloadCommand.
+#[derive(Debug, Args)]
+pub struct UnloadCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+
+    /// Names of the secrets to unload. Every secret of the profile is unloaded if not provided.
+    #[arg(help = "Secret names (the whole profile if not provided).")]
+    pub names: Vec<String>,
+
+    /// Profile the secrets belong to.
+    #[arg(
+        help = "Profile name (the default profile if not provided).",
+        env = "KEYSAFE_DEFAULT_PROFILE",
+        long,
+        short
+    )]
+    pub profile: Option<String>,
 
     /// Output flags.
     #[command(flatten)]
