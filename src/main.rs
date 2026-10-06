@@ -27,14 +27,23 @@ fn main() -> ExitCode {
 
     // Keep working with the config used before keysafe had its own name. The hint is
     // left out of `init`, which runs on every shell start.
+    // `config init` always creates the config at the new location.
     let init = matches!(program.command, ProgramCommand::Init(_));
-    if let Some(legacy) = program.command.parent_mut().use_legacy_config() {
-        if !init {
-            info(format!(
-                "using {}; move it to {} (or set KEYSAFE_CONFIG_FILE)",
-                legacy.display(),
-                default_config().display()
-            ));
+    let config_init = matches!(
+        program.command,
+        ProgramCommand::Config(ConfigCommandArgs {
+            command: ConfigCommand::Init(_)
+        })
+    );
+    if !config_init {
+        if let Some(legacy) = program.command.parent_mut().use_legacy_config() {
+            if !init {
+                info(format!(
+                    "using {}; move it to {} (or set KEYSAFE_CONFIG_FILE)",
+                    legacy.display(),
+                    default_config().display()
+                ));
+            }
         }
     }
 
@@ -124,6 +133,25 @@ fn run(program: Program) -> Result<ExitCode> {
             ProfileCommand::Clear(args) => {
                 let cache = cache(&args.parent);
                 let mut command = ProfileClearCommand { cache };
+                command.execute(&args)?
+            }
+        },
+        ProgramCommand::Config(args) => match args.command {
+            ConfigCommand::Init(args) => {
+                let mut command = ConfigInitCommand;
+                command.execute(&args)?
+            }
+            ConfigCommand::Edit(args) => {
+                let editor = std::env::var("VISUAL")
+                    .or_else(|_| std::env::var("EDITOR"))
+                    .unwrap_or_else(|_| "vi".to_string());
+                let mut command = ConfigEditCommand { editor };
+                command.execute(&args)?
+            }
+            ConfigCommand::Path(args) => {
+                let writer = Box::new(std::io::stdout());
+                let env = std::env::var_os("KEYSAFE_CONFIG_FILE").map(PathBuf::from);
+                let mut command = ConfigPathCommand { writer, env };
                 command.execute(&args)?
             }
         },

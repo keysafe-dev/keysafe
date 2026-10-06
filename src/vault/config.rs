@@ -25,8 +25,9 @@ struct ProfileSpec {
     provider: Option<ProviderSpec>,
     /// The 1Password account, which used to sit on the profile itself.
     account: Option<serde_yaml_ng::Value>,
-    #[serde(default)]
-    secrets: Vec<SecretSpec>,
+    /// Secrets of the profile. An empty `secrets:` key, e.g. with only comments below it,
+    /// means none.
+    secrets: Option<Vec<SecretSpec>>,
 }
 
 /// Raw representation of a configured provider, selected by its `type`.
@@ -66,8 +67,17 @@ pub struct Config {
 impl Config {
     /// Reads, parses and validates the configuration file at `path`.
     pub fn read_from_file(path: &Path) -> Result<Config> {
-        let data = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+                "config file not found: {} (create one with `keysafe config init`)",
+                path.display()
+            ),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read config file {}", path.display()))
+            }
+        };
         Self::parse(&data).with_context(|| format!("invalid config file {}", path.display()))
     }
 
@@ -154,7 +164,7 @@ impl TryFrom<Spec> for Config {
                 .into();
 
             let mut secrets = Vec::new();
-            for (j, secret) in profile.secrets.into_iter().enumerate() {
+            for (j, secret) in profile.secrets.unwrap_or_default().into_iter().enumerate() {
                 let kind = secret.kind.filter(|s| !s.is_empty()).ok_or_else(|| {
                     anyhow!("secret at profile '{name}' index {j} missing 'kind' field")
                 })?;
@@ -519,6 +529,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_an_empty_secrets_key() {
+        let data = "version: 1\nprofiles:\n  - name: p\n    provider:\n      type: 1password\n    secrets:\n      # none yet\n";
+        assert!(Config::parse(data).unwrap().profiles[0].secrets.is_empty());
+    }
+
+    #[test]
     fn parse_fails_when_provider_is_missing() {
         assert_eq!(
             parse_err("version: 1\nprofiles:\n  - name: p\n"),
@@ -620,7 +636,7 @@ mod tests {
         let err = Config::read_from_file(Path::new("/nonexistent/config.yml")).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "failed to read config file /nonexistent/config.yml"
+            "config file not found: /nonexistent/config.yml (create one with `keysafe config init`)"
         );
     }
 

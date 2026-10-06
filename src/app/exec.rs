@@ -725,6 +725,119 @@ impl StatusCommand {
     }
 }
 
+/// The starter config written by `keysafe config init`.
+const STARTER_CONFIG: &str = include_str!("config.yml");
+
+/// Create a starter config file.
+pub struct ConfigInitCommand;
+
+impl ConfigInitCommand {
+    /// Execute the ConfigInitCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ConfigInitCommandArgs) -> Result<()> {
+        let path = &args.parent.config;
+        if path.exists() && !args.force {
+            bail!(
+                "{} already exists (edit it with `keysafe config edit`, or replace it with --force)",
+                path.display()
+            );
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+        std::fs::write(path, STARTER_CONFIG)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+
+        info(format!(
+            "created {}; add your secrets with `keysafe config edit`",
+            path.display()
+        ));
+        Ok(())
+    }
+}
+
+/// Open the config file in an editor, then check it.
+pub struct ConfigEditCommand {
+    /// Editor command, which may include arguments (e.g. `code --wait`).
+    pub editor: String,
+}
+
+impl ConfigEditCommand {
+    /// Execute the ConfigEditCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ConfigEditCommandArgs) -> Result<()> {
+        let path = &args.parent.config;
+        if !path.exists() {
+            bail!(
+                "config file not found: {} (create one with `keysafe config init`)",
+                path.display()
+            );
+        }
+
+        // Run the editor through the shell, so commands with arguments work
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{} \"$1\"", self.editor))
+            .arg("sh")
+            .arg(path)
+            .status()
+            .with_context(|| format!("failed to run the editor ({})", self.editor))?;
+        if !status.success() {
+            bail!("the editor ({}) exited with {status}", self.editor);
+        }
+
+        let config = Config::read_from_file(path)
+            .context("the config is not valid; fix it with `keysafe config edit`")?;
+        info(format!(
+            "{} is valid ({} profile(s))",
+            path.display(),
+            config.profiles.len()
+        ));
+        Ok(())
+    }
+}
+
+/// Returns where the config file `path` comes from, given `KEYSAFE_CONFIG_FILE`.
+fn config_source(path: &Path, env: Option<&Path>) -> String {
+    if env == Some(path) {
+        "set by KEYSAFE_CONFIG_FILE".into()
+    } else if path == default_config() {
+        "the default location".into()
+    } else if path == legacy_config() {
+        format!(
+            "zsh-op's location; move it to {}",
+            default_config().display()
+        )
+    } else {
+        "set by --config".into()
+    }
+}
+
+/// Print the path of the config file in use.
+pub struct ConfigPathCommand {
+    /// Writer used to output the path.
+    pub writer: Box<dyn Write>,
+    /// Value of `KEYSAFE_CONFIG_FILE`, if set.
+    pub env: Option<PathBuf>,
+}
+
+impl ConfigPathCommand {
+    /// Execute the ConfigPathCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ConfigPathCommandArgs) -> Result<()> {
+        let path = &args.parent.config;
+        writeln!(self.writer, "{}", path.display())?;
+
+        let source = config_source(path, self.env.as_deref());
+        if path.exists() {
+            info(source);
+        } else {
+            info(format!(
+                "{source}; it does not exist yet (create it with `keysafe config init`)"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// List the profile names, one per line.
 pub struct ProfileListCommand {
     /// Writer used to output the names.
@@ -2014,6 +2127,126 @@ mod tests {
             result.unwrap_err().to_string(),
             "unload prints shell statements; use --format zsh or --format bash"
         );
+    }
+
+    #[test]
+    fn starter_config_is_valid() -> Result<()> {
+        let config = Config::parse(STARTER_CONFIG)?;
+        assert_eq!(config.default_profile().name, "personal");
+        assert!(config.default_profile().secrets.is_empty());
+        Ok(())
+    }
+
+    fn config_init_args(fixture: &Fixture, force: bool) -> ConfigInitCommandArgs {
+        ConfigInitCommandArgs {
+            parent: ProgramArgs {
+                config: fixture.dir.path().join("new/keysafe/config.yml"),
+                ..fixture.parent()
+            },
+            force,
+        }
+    }
+
+    #[test]
+    fn config_init_writes_the_starter_config() -> Result<()> {
+        let fixture = Fixture::new();
+        let args = config_init_args(&fixture, false);
+
+        ConfigInitCommand.execute(&args)?;
+
+        assert_eq!(
+            std::fs::read_to_string(&args.parent.config)?,
+            STARTER_CONFIG
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_init_replaces_a_config_only_with_force() -> Result<()> {
+        let fixture = Fixture::new();
+        let args = config_init_args(&fixture, false);
+        ConfigInitCommand.execute(&args)?;
+        std::fs::write(&args.parent.config, "mine")?;
+
+        let err = ConfigInitCommand.execute(&args).unwrap_err().to_string();
+        assert!(
+            err.ends_with(
+                "already exists (edit it with `keysafe config edit`, or replace it with --force)"
+            ),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&args.parent.config)?, "mine");
+
+        ConfigInitCommand.execute(&config_init_args(&fixture, true))?;
+        assert_eq!(
+            std::fs::read_to_string(&args.parent.config)?,
+            STARTER_CONFIG
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_edit_runs_the_editor_and_checks_the_config() -> Result<()> {
+        let fixture = Fixture::new();
+        let args = ConfigEditCommandArgs {
+            parent: fixture.parent(),
+        };
+
+        // An editor with arguments, which leaves a valid config
+        let marker = fixture.dir.path().join("edited");
+        let mut cmd = ConfigEditCommand {
+            editor: format!("touch '{}' &&  test -f", marker.display()),
+        };
+        cmd.execute(&args)?;
+        assert!(marker.exists());
+
+        // An editor that breaks the config
+        let mut cmd = ConfigEditCommand {
+            editor: "printf 'version: 2\\n' >".into(),
+        };
+        let err = cmd.execute(&args).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the config is not valid; fix it with `keysafe config edit`"
+        );
+        assert!(format!("{err:#}").contains("unsupported config version: 2"));
+        Ok(())
+    }
+
+    #[test]
+    fn config_edit_fails_without_a_config() {
+        let fixture = Fixture::new();
+        let mut cmd = ConfigEditCommand {
+            editor: "true".into(),
+        };
+
+        let err = cmd
+            .execute(&ConfigEditCommandArgs {
+                parent: ProgramArgs {
+                    config: fixture.dir.path().join("missing.yml"),
+                    ..fixture.parent()
+                },
+            })
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .ends_with("(create one with `keysafe config init`)"));
+    }
+
+    #[test]
+    fn config_source_says_where_the_path_comes_from() {
+        let custom = Path::new("/etc/keysafe.yml");
+        assert_eq!(
+            config_source(custom, Some(custom)),
+            "set by KEYSAFE_CONFIG_FILE"
+        );
+        assert_eq!(config_source(custom, None), "set by --config");
+        assert_eq!(
+            config_source(&default_config(), None),
+            "the default location"
+        );
+        assert!(config_source(&legacy_config(), None).starts_with("zsh-op's location"));
     }
 
     #[test]
