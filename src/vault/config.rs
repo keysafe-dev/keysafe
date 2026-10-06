@@ -6,14 +6,16 @@ use std::{fmt::Display, path::Path};
 struct Spec {
     /// Version of the configuration format.
     version: Option<serde_yaml_ng::Value>,
-    /// 1Password accounts, one per profile.
+    /// Profiles and the secrets they load.
     #[serde(default)]
-    accounts: Vec<AccountSpec>,
+    profiles: Vec<ProfileSpec>,
+    /// Profiles in the zsh-op format, which named them accounts.
+    accounts: Option<serde_yaml_ng::Value>,
 }
 
-/// Raw representation of a configured account, before validation.
+/// Raw representation of a configured profile, before validation.
 #[derive(serde::Deserialize)]
-struct AccountSpec {
+struct ProfileSpec {
     name: Option<String>,
     account: Option<String>,
     #[serde(default)]
@@ -31,8 +33,8 @@ struct SecretSpec {
 /// Validated configuration: the profiles and the secrets they load.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Configured accounts, one per profile.
-    pub accounts: Vec<Account>,
+    /// Configured profiles.
+    pub profiles: Vec<Profile>,
 }
 
 impl Config {
@@ -49,13 +51,13 @@ impl Config {
         Self::try_from(spec)
     }
 
-    /// Returns the account of the given profile.
-    pub fn profile(&self, name: &str) -> Result<&Account> {
-        self.accounts
+    /// Returns the profile with the given name.
+    pub fn profile(&self, name: &str) -> Result<&Profile> {
+        self.profiles
             .iter()
             .find(|a| a.name == name)
             .ok_or_else(|| {
-                let names: Vec<&str> = self.accounts.iter().map(|a| a.name.as_str()).collect();
+                let names: Vec<&str> = self.profiles.iter().map(|a| a.name.as_str()).collect();
                 anyhow!(
                     "profile '{}' not found in config (available profiles: {})",
                     name,
@@ -77,39 +79,42 @@ impl TryFrom<Spec> for Config {
         if version != "1" {
             bail!("unsupported config version: {version} (supported versions: 1)");
         }
-        if spec.accounts.is_empty() {
-            bail!("config has no accounts defined");
+        if spec.accounts.is_some() {
+            bail!("config uses 'accounts', the zsh-op format: rename it to 'profiles'");
+        }
+        if spec.profiles.is_empty() {
+            bail!("config has no profiles defined");
         }
 
-        let mut accounts = Vec::new();
-        for (i, account) in spec.accounts.into_iter().enumerate() {
-            let name = account
+        let mut profiles = Vec::new();
+        for (i, profile) in spec.profiles.into_iter().enumerate() {
+            let name = profile
                 .name
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("account at index {i} missing 'name' field"))?;
+                .ok_or_else(|| anyhow!("profile at index {i} missing 'name' field"))?;
             // Profile names are used in file paths and keychain service names.
             if name.starts_with('.')
                 || !name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             {
-                bail!("account name '{name}' may only contain letters, digits, '.', '_' and '-'");
+                bail!("profile name '{name}' may only contain letters, digits, '.', '_' and '-'");
             }
-            if accounts.iter().any(|a: &Account| a.name == name) {
-                bail!("account '{name}' is defined more than once");
+            if profiles.iter().any(|a: &Profile| a.name == name) {
+                bail!("profile '{name}' is defined more than once");
             }
-            let url = account
+            let url = profile
                 .account
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("account '{name}' missing 'account' field"))?;
+                .ok_or_else(|| anyhow!("profile '{name}' missing 'account' field"))?;
 
             let mut secrets = Vec::new();
-            for (j, secret) in account.secrets.into_iter().enumerate() {
+            for (j, secret) in profile.secrets.into_iter().enumerate() {
                 let kind = secret.kind.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    anyhow!("secret at account '{name}' index {j} missing 'kind' field")
+                    anyhow!("secret at profile '{name}' index {j} missing 'kind' field")
                 })?;
                 let secret_name = secret.name.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    anyhow!("secret at account '{name}' index {j} missing 'name' field")
+                    anyhow!("secret at profile '{name}' index {j} missing 'name' field")
                 })?;
                 let kind = kind.parse::<SecretKind>().map_err(|_| {
                     anyhow!(
@@ -124,13 +129,13 @@ impl TryFrom<Spec> for Config {
                     );
                 }
                 let path = secret.path.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    anyhow!("secret '{secret_name}' in account '{name}' missing 'path' field")
+                    anyhow!("secret '{secret_name}' in profile '{name}' missing 'path' field")
                 })?;
                 if !path.starts_with("op://") {
                     bail!("secret '{secret_name}' has invalid path: {path} (path must start with 'op://')");
                 }
                 if secrets.iter().any(|s: &Secret| s.name == secret_name) {
-                    bail!("secret '{secret_name}' is defined more than once in account '{name}'");
+                    bail!("secret '{secret_name}' is defined more than once in profile '{name}'");
                 }
 
                 secrets.push(Secret {
@@ -140,14 +145,14 @@ impl TryFrom<Spec> for Config {
                 });
             }
 
-            accounts.push(Account {
+            profiles.push(Profile {
                 name,
                 account: url,
                 secrets,
             });
         }
 
-        Ok(Config { accounts })
+        Ok(Config { profiles })
     }
 }
 
@@ -160,7 +165,7 @@ fn is_variable_name(name: &str) -> bool {
 
 /// A profile: a 1Password account and the secrets loaded from it.
 #[derive(Debug, Clone)]
-pub struct Account {
+pub struct Profile {
     /// Profile name.
     pub name: String,
     /// 1Password account URL (e.g. my.1password.com).
@@ -169,7 +174,7 @@ pub struct Account {
     pub secrets: Vec<Secret>,
 }
 
-impl Account {
+impl Profile {
     /// Returns the secret with the given name.
     pub fn secret(&self, name: &str) -> Result<&Secret> {
         self.secrets.iter().find(|s| s.name == name).ok_or_else(|| {
@@ -243,7 +248,7 @@ mod tests {
 
     const VALID: &str = indoc! {"
         version: 1
-        accounts:
+        profiles:
           - name: personal
             account: my.1password.com
             secrets:
@@ -262,7 +267,7 @@ mod tests {
 
     /// Builds a single-account config around the given secrets YAML block.
     fn with_secrets(secrets: &str) -> String {
-        format!("version: 1\naccounts:\n  - name: p\n    account: a.1password.com\n    secrets:\n{secrets}")
+        format!("version: 1\nprofiles:\n  - name: p\n    account: a.1password.com\n    secrets:\n{secrets}")
     }
 
     fn parse_err(data: &str) -> String {
@@ -272,7 +277,7 @@ mod tests {
     #[test]
     fn parse_accepts_valid_config() {
         let config = Config::parse(VALID).unwrap();
-        assert_eq!(config.accounts.len(), 2);
+        assert_eq!(config.profiles.len(), 2);
 
         let personal = config.profile("personal").unwrap();
         assert_eq!(personal.account, "my.1password.com");
@@ -305,26 +310,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_fails_when_accounts_are_empty() {
+    fn parse_fails_on_the_zsh_op_format() {
+        let data = VALID.replace("profiles:", "accounts:");
         assert_eq!(
-            parse_err("version: 1\naccounts: []\n"),
-            "config has no accounts defined"
+            parse_err(&data),
+            "config uses 'accounts', the zsh-op format: rename it to 'profiles'"
+        );
+    }
+
+    #[test]
+    fn parse_fails_when_profiles_are_empty() {
+        assert_eq!(
+            parse_err("version: 1\nprofiles: []\n"),
+            "config has no profiles defined"
         );
     }
 
     #[test]
     fn parse_fails_when_account_name_is_missing() {
         assert_eq!(
-            parse_err("version: 1\naccounts:\n  - account: a.1password.com\n"),
-            "account at index 0 missing 'name' field"
+            parse_err("version: 1\nprofiles:\n  - account: a.1password.com\n"),
+            "profile at index 0 missing 'name' field"
         );
     }
 
     #[test]
     fn parse_fails_when_account_name_is_not_path_safe() {
         assert_eq!(
-            parse_err("version: 1\naccounts:\n  - name: ../p\n    account: a.1password.com\n"),
-            "account name '../p' may only contain letters, digits, '.', '_' and '-'"
+            parse_err("version: 1\nprofiles:\n  - name: ../p\n    account: a.1password.com\n"),
+            "profile name '../p' may only contain letters, digits, '.', '_' and '-'"
         );
     }
 
@@ -332,16 +346,16 @@ mod tests {
     fn parse_fails_when_account_name_is_duplicated() {
         let account = "  - name: p\n    account: a.1password.com\n";
         assert_eq!(
-            parse_err(&format!("version: 1\naccounts:\n{}", account.repeat(2))),
-            "account 'p' is defined more than once"
+            parse_err(&format!("version: 1\nprofiles:\n{}", account.repeat(2))),
+            "profile 'p' is defined more than once"
         );
     }
 
     #[test]
     fn parse_fails_when_account_url_is_missing() {
         assert_eq!(
-            parse_err("version: 1\naccounts:\n  - name: p\n"),
-            "account 'p' missing 'account' field"
+            parse_err("version: 1\nprofiles:\n  - name: p\n"),
+            "profile 'p' missing 'account' field"
         );
     }
 
@@ -350,7 +364,7 @@ mod tests {
         let data = with_secrets("      - name: A\n        path: op://v/i/f\n");
         assert_eq!(
             parse_err(&data),
-            "secret at account 'p' index 0 missing 'kind' field"
+            "secret at profile 'p' index 0 missing 'kind' field"
         );
     }
 
@@ -368,7 +382,7 @@ mod tests {
         let data = with_secrets("      - kind: env\n        path: op://v/i/f\n");
         assert_eq!(
             parse_err(&data),
-            "secret at account 'p' index 0 missing 'name' field"
+            "secret at profile 'p' index 0 missing 'name' field"
         );
     }
 
@@ -377,7 +391,7 @@ mod tests {
         let data = with_secrets("      - kind: env\n        name: A\n");
         assert_eq!(
             parse_err(&data),
-            "secret 'A' in account 'p' missing 'path' field"
+            "secret 'A' in profile 'p' missing 'path' field"
         );
     }
 
@@ -425,7 +439,7 @@ mod tests {
         let data = with_secrets(&secret.repeat(2));
         assert_eq!(
             parse_err(&data),
-            "secret 'A' is defined more than once in account 'p'"
+            "secret 'A' is defined more than once in profile 'p'"
         );
     }
 

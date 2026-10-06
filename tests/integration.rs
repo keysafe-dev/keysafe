@@ -3,7 +3,7 @@ use predicates::prelude::*;
 use std::path::Path;
 
 const CONFIG: &str = "version: 1
-accounts:
+profiles:
   - name: personal
     account: my.1password.com
     secrets:

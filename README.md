@@ -42,7 +42,7 @@ Create `~/.config/keysafe/config.yml` (or `$XDG_CONFIG_HOME/keysafe/config.yml`)
 ```yaml
 version: 1
 
-accounts:
+profiles:
   - name: personal
     account: my.1password.com
     secrets:
@@ -68,7 +68,7 @@ accounts:
 
 See [config.example.yml](config.example.yml) for a complete annotated example. To find an `op://` path, right-click an item in the 1Password desktop app and select **Copy Secret Reference**. Append `?ssh-format=openssh` for SSH keys.
 
-Each account is a **profile**. Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
+Each profile reads its secrets from one 1Password `account`. Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
 
 ### Environment Variables
 

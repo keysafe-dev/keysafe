@@ -74,7 +74,7 @@ fn write_runtime_dir(
 fn resolve_cached(
     loader: &Loader,
     runtime: &RuntimeDir,
-    account: &Account,
+    account: &Profile,
 ) -> Result<(Vec<Variable>, usize)> {
     let Some(names) = loader.cache.loaded(&account.name)? else {
         return Ok((Vec::new(), 0));
@@ -144,7 +144,7 @@ impl LoadCommand {
     }
 
     /// Adds `keys` to the agent, reporting what happened. Returns the number of failures.
-    fn add_keys(&self, account: &Account, keys: &[&Secret], args: &LoadCommandArgs) -> usize {
+    fn add_keys(&self, account: &Profile, keys: &[&Secret], args: &LoadCommandArgs) -> usize {
         if keys.is_empty() {
             return 0;
         }
@@ -231,7 +231,7 @@ impl ExportCommand {
     pub fn execute(&mut self, args: &ExportCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
         let accounts = if args.all {
-            config.accounts.iter().collect()
+            config.profiles.iter().collect()
         } else {
             vec![config.profile(&args.profile)?]
         };
@@ -266,9 +266,9 @@ impl ExportCommand {
 fn completion(shell: Shell, config: Option<&Config>) -> Result<String> {
     let mut command = Program::command();
     if let Some(config) = config {
-        let profiles: Vec<String> = config.accounts.iter().map(|a| a.name.clone()).collect();
+        let profiles: Vec<String> = config.profiles.iter().map(|a| a.name.clone()).collect();
         let mut secrets: Vec<String> = config
-            .accounts
+            .profiles
             .iter()
             .flat_map(|a| a.secrets.iter().map(|s| s.name.clone()))
             .collect();
@@ -355,7 +355,7 @@ impl InitCommand {
         // Export the cached secrets of the loaded profiles; failures were already reported
         let runtime = RuntimeDir::new(None);
         let mut variables = Vec::new();
-        for account in &config.accounts {
+        for account in &config.profiles {
             match resolve_cached(&self.loader, &runtime, account) {
                 Ok((mut resolved, _)) => variables.append(&mut resolved),
                 Err(err) => warn(format!("{err:#}")),
@@ -450,7 +450,7 @@ impl ProfileListCommand {
     /// Execute the ProfileListCommand with the provided arguments.
     pub fn execute(&mut self, args: &ProfileListCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
-        for account in &config.accounts {
+        for account in &config.profiles {
             writeln!(self.writer, "{}", account.name)?;
         }
 
@@ -472,7 +472,7 @@ impl ProfileShowCommand {
         let config = Config::read_from_file(&args.parent.config)?;
         let accounts = match &args.profile {
             Some(profile) => vec![config.profile(profile)?],
-            None => config.accounts.iter().collect(),
+            None => config.profiles.iter().collect(),
         };
 
         for (i, account) in accounts.iter().enumerate() {
@@ -558,7 +558,7 @@ mod tests {
 
     const CONFIG: &str = indoc! {"
         version: 1
-        accounts:
+        profiles:
           - name: personal
             account: my.1password.com
             secrets:

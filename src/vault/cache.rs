@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::log::warn;
-use crate::vault::Account;
+use crate::vault::Profile;
 
 /// SecretStore persists secret values in a secure credential store.
 pub trait SecretStore {
@@ -193,7 +193,7 @@ impl Cache {
     }
 
     /// Records every secret of `account` as loaded.
-    pub fn save(&self, account: &Account) -> Result<()> {
+    pub fn save(&self, account: &Profile) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("failed to create {}", self.dir.display()))?;
 
@@ -212,7 +212,7 @@ impl Cache {
     /// Deletes every cached secret of `account`, including secrets that are only recorded in
     /// its metadata or stored under the legacy service, and forgets that it was loaded.
     /// Returns the number of deleted secrets.
-    pub fn clear(&self, account: &Account) -> Result<usize> {
+    pub fn clear(&self, account: &Profile) -> Result<usize> {
         let mut names: Vec<String> = account.secrets.iter().map(|s| s.name.clone()).collect();
         for name in self.loaded(&account.name)?.unwrap_or_default() {
             if !names.contains(&name) {
@@ -294,10 +294,10 @@ mod tests {
     use crate::vault::Config;
     use indoc::indoc;
 
-    fn account() -> Account {
+    fn account() -> Profile {
         let config = Config::parse(indoc! {"
             version: 1
-            accounts:
+            profiles:
               - name: personal
                 account: my.1password.com
                 secrets:
@@ -309,7 +309,7 @@ mod tests {
                     path: op://Private/SSH/private key
         "})
         .unwrap();
-        config.accounts[0].clone()
+        config.profiles[0].clone()
     }
 
     #[test]

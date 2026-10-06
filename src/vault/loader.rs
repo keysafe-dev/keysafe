@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::log::warn;
 use crate::vault::{
-    fingerprint, Account, Cache, KeyAgent, RuntimeDir, Secret, SecretClient, SecretKind,
+    fingerprint, Cache, KeyAgent, Profile, RuntimeDir, Secret, SecretClient, SecretKind,
 };
 
 /// Source decides where secret values may come from.
@@ -34,7 +34,7 @@ pub struct Loader {
 impl Loader {
     /// Returns the value of `secret`: from the cache unless `refresh` is set, otherwise
     /// from 1Password, caching the fetched value.
-    pub fn load(&self, account: &Account, secret: &Secret, refresh: bool) -> Result<String> {
+    pub fn load(&self, account: &Profile, secret: &Secret, refresh: bool) -> Result<String> {
         if !refresh {
             match self.cache.get(&account.name, &secret.name) {
                 Ok(Some(value)) => return Ok(value),
@@ -56,7 +56,7 @@ impl Loader {
     pub fn resolve<'a>(
         &self,
         runtime: &RuntimeDir,
-        account: &Account,
+        account: &Profile,
         secrets: impl IntoIterator<Item = &'a Secret>,
         source: Source,
     ) -> (Vec<Variable>, usize) {
@@ -97,7 +97,7 @@ impl Loader {
         &self,
         agent: &dyn KeyAgent,
         present: &[String],
-        account: &Account,
+        account: &Profile,
         secret: &Secret,
         lifetime: &str,
         refresh: bool,

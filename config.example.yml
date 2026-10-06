@@ -1,12 +1,12 @@
 # keysafe configuration file
 # Location: ~/.config/keysafe/config.yml
 #
-# This file defines your 1Password accounts and the secrets to load from them.
-# Each account can have multiple environment variables and SSH keys.
+# This file defines your profiles: a 1Password account each, and the secrets to load from it.
+# Each profile can have multiple environment variables, files and SSH keys.
 
 version: 1
 
-accounts:
+profiles:
   # Personal 1Password account
   - name: personal
     account: my.1password.com
