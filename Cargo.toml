@@ -1,6 +1,6 @@
 [package]
 name = "keysafe"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Load 1Password secrets into your shell: cached in the system keychain, exported as environment variables or files, and added to ssh-agent"
 license = "MIT"
