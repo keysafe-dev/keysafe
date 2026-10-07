@@ -140,7 +140,7 @@ Commands:
   exec     Execute a command with the secrets of a profile in its environment.
   status   Show what is loaded: secrets in this shell, SSH keys in the agent, exported profiles.
   doctor   Check the setup and say how to fix problems.
-  profile  List, show and clear profiles.
+  profile  List, show, clear and prune profiles.
   config   Create, edit and locate the config file.
   init     Print the shell integration script for zsh or bash.
 ```
@@ -160,7 +160,7 @@ keysafe load github-work -e 4h        # one SSH key
 
 Loading a whole profile records it, so its cached secrets are exported in every new shell. Loading individual secrets doesn't.
 
-`unload` undoes `load`: it unsets the variables, deletes the files of file secrets and removes the SSH keys keysafe added from ssh-agent.
+`unload` undoes `load`: it unsets the variables, deletes the files of file secrets and removes the SSH keys keysafe added from ssh-agent. That includes secrets loaded before you removed them from the config.
 
 ```bash
 keysafe unload -p work                # the whole profile; new shells no longer get it either
@@ -200,7 +200,10 @@ keysafe status -p work           # one profile
 keysafe profile list          # profile names
 keysafe profile show work     # provider, secrets and whether it's exported in new shells (never values)
 keysafe profile clear work    # delete its cached secrets and forget it was loaded
+keysafe profile prune work    # delete only what the config no longer names
 ```
+
+When you remove a secret from the config, its cached value and any SSH key keysafe added stay behind until you prune them. `keysafe doctor` tells you when there is something to prune, including profiles you removed from the config. Pruning doesn't touch open shells: run `keysafe unload` there.
 
 ## How It Works
 
@@ -218,7 +221,7 @@ keysafe picks up where the zsh-op plugin left off:
 - With no config at the new location, `~/.config/op/config.yml` is used, with a hint to move it.
 - Profiles recorded in `~/.cache/op` count as loaded until you load them again.
 - Secrets cached under `op-secrets-<profile>` move to `keysafe.<profile>` the first time they are read; the old items are deleted.
-- Items zsh-op cached that keysafe never reads, such as secrets no longer in your config, stay behind. `keysafe doctor` warns about them and `keysafe profile clear <profile>` deletes them.
+- Items zsh-op cached that keysafe never reads, such as secrets no longer in your config, stay behind. `keysafe doctor` warns about them and `keysafe profile prune <profile>` deletes them.
 
 ## Troubleshooting
 

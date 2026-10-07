@@ -43,6 +43,9 @@ const SHOW_EXAMPLES: &str = "Examples:
   keysafe profile show work  # one profile";
 const CLEAR_EXAMPLES: &str = "Examples:
   keysafe profile clear work  # delete its cached secrets";
+const PRUNE_EXAMPLES: &str = "Examples:
+  keysafe profile prune work  # delete what the config no longer names
+  keysafe profile prune old   # everything of a profile removed from the config";
 const INIT_CONFIG_EXAMPLES: &str = "Examples:
   keysafe config init          # create ~/.config/keysafe/config.yml
   keysafe config init --force  # start over";
@@ -191,7 +194,7 @@ pub enum ProgramCommand {
         name = "unload",
         after_help = UNLOAD_EXAMPLES,
         about = "Unload secrets of a profile from the current shell.",
-        long_about = "Undo `load`: unset the environment variables, delete the files of file secrets, and remove the SSH keys keysafe added from ssh-agent. Without names, the whole profile is unloaded and no longer exported in new shells. Its cached secrets stay; use `profile clear` to delete them. Needs the shell integration (`keysafe init`); otherwise, evaluate the printed statements yourself.",
+        long_about = "Undo `load`: unset the environment variables, delete the files of file secrets, and remove the SSH keys keysafe added from ssh-agent. Without names, the whole profile is unloaded and no longer exported in new shells, including secrets loaded before they were removed from the config. Its cached secrets stay; use `profile clear` to delete them. Needs the shell integration (`keysafe init`); otherwise, evaluate the printed statements yourself.",
         next_display_order = 2
     )]
     Unload(UnloadCommandArgs),
@@ -246,10 +249,10 @@ pub enum ProgramCommand {
     )]
     Doctor(DoctorCommandArgs),
 
-    /// List, show and clear profiles.
+    /// List, show, clear and prune profiles.
     #[command(
         name = "profile",
-        about = "List, show and clear profiles.",
+        about = "List, show, clear and prune profiles.",
         next_display_order = 8
     )]
     Profile(ProfileCommandArgs),
@@ -288,6 +291,7 @@ impl ProgramCommand {
                 ProfileCommand::List(args) => &mut args.parent,
                 ProfileCommand::Show(args) => &mut args.parent,
                 ProfileCommand::Clear(args) => &mut args.parent,
+                ProfileCommand::Prune(args) => &mut args.parent,
             },
             Self::Config(args) => match &mut args.command {
                 ConfigCommand::Init(args) => &mut args.parent,
@@ -360,10 +364,20 @@ pub enum ProfileCommand {
         name = "clear",
         after_help = CLEAR_EXAMPLES,
         about = "Clear the cached secrets of a profile.",
-        long_about = "Delete every cached secret of a profile from the keychain and forget that the profile was loaded.",
+        long_about = "Delete every cached secret of a profile from the keychain and forget that the profile was loaded. The next `load` fetches every secret from 1Password again. To delete only the secrets the config no longer names, use `profile prune`.",
         next_display_order = 3
     )]
     Clear(ProfileClearCommandArgs),
+
+    /// Delete what keysafe keeps of secrets removed from the config.
+    #[command(
+        name = "prune",
+        after_help = PRUNE_EXAMPLES,
+        about = "Delete what keysafe keeps of secrets removed from the config.",
+        long_about = "Delete the cached secrets of a profile that its config no longer names, and remove the SSH keys keysafe added for them from ssh-agent. The profile stays loaded. For a profile removed from the config, everything keysafe kept of it is deleted. Variables already set in open shells stay; use `unload` there. `keysafe doctor` says when there is something to prune. To delete every cached secret of a profile, use `profile clear`.",
+        next_display_order = 4
+    )]
+    Prune(ProfilePruneCommandArgs),
 }
 
 /// Shell specifies a shell supported by the shell integration.
@@ -697,6 +711,18 @@ pub struct ProfileClearCommandArgs {
     pub profile: String,
 }
 
+/// ProfilePruneCommandArgs defines the arguments for the ProfilePruneCommand.
+#[derive(Debug, Args)]
+pub struct ProfilePruneCommandArgs {
+    /// Shared global flags.
+    #[command(flatten)]
+    pub parent: ProgramArgs,
+
+    /// Profile whose orphaned secrets are deleted.
+    #[arg(help = "Profile name (may be one removed from the config).")]
+    pub profile: String,
+}
+
 /// ExportCommandArgs defines the arguments for the ExportCommand.
 #[derive(Debug, Args)]
 pub struct ExportCommandArgs {
@@ -968,8 +994,9 @@ mod tests {
         };
         assert_eq!(args.profile, "work");
 
-        // Clearing needs an explicit profile
+        // Clearing and pruning need an explicit profile
         assert!(Program::try_parse_from(["keysafe", "profile", "clear"]).is_err());
+        assert!(Program::try_parse_from(["keysafe", "profile", "prune"]).is_err());
     }
 
     #[test]
