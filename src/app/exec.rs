@@ -1055,24 +1055,26 @@ impl DoctorCommand {
             Ok(_) => {
                 self.report(Check::Ok, "Keychain", "reachable")?;
 
-                // Secrets zsh-op cached under its own service names
                 for profile in profiles {
-                    let Ok(items) = self.cache.legacy_items(&profile.name) else {
-                        continue;
-                    };
-                    if !items.is_empty() {
-                        let detail = format!(
-                            "{} left from zsh-op under {} (remove them with `keysafe profile clear {}`)",
-                            count(items.len(), "item"),
-                            Cache::legacy_service(&profile.name),
-                            profile.name
-                        );
-                        self.report(Check::Warning, "Keychain", detail)?;
+                    let configured: Vec<&str> =
+                        profile.secrets.iter().map(|s| s.name.as_str()).collect();
+
+                    // Secrets zsh-op cached under its own service names. Those still in the
+                    // config move to keysafe's service when they are read.
+                    if let Ok(mut items) = self.cache.legacy_items(&profile.name) {
+                        items.retain(|name| !configured.contains(&name.as_str()));
+                        if !items.is_empty() {
+                            let detail = format!(
+                                "{} left from zsh-op under {}, no longer in the config (remove them with `keysafe profile prune {}`)",
+                                count(items.len(), "item"),
+                                Cache::legacy_service(&profile.name),
+                                profile.name
+                            );
+                            self.report(Check::Warning, "Keychain", detail)?;
+                        }
                     }
 
                     // Secrets cached before they were removed from the config
-                    let configured: Vec<&str> =
-                        profile.secrets.iter().map(|s| s.name.as_str()).collect();
                     let Ok(items) = self.cache.orphaned(&profile.name, &configured) else {
                         continue;
                     };
@@ -2850,6 +2852,8 @@ mod tests {
     fn doctor_warns_about_items_left_from_zsh_op() -> Result<()> {
         let fixture = Fixture::new();
         fixture.store.set("op-secrets-work", "OLD_TOKEN", "x")?;
+        // Still configured: moves to keysafe.work when it is read
+        fixture.store.set("op-secrets-work", "API_KEY", "y")?;
         let mut client = MockSecretClient::new();
         client.expect_check().returning(|_| Ok("fine".into()));
         let (mut cmd, writer) = doctor(&fixture, client, agent(vec![]));
@@ -2860,7 +2864,7 @@ mod tests {
         })?;
 
         assert!(writer.contents().contains(
-            "! Keychain: 1 item left from zsh-op under op-secrets-work (remove them with `keysafe profile clear work`)\n"
+            "! Keychain: 1 item left from zsh-op under op-secrets-work, no longer in the config (remove them with `keysafe profile prune work`)\n"
         ));
         Ok(())
     }

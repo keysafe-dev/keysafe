@@ -364,7 +364,7 @@ pub enum ProfileCommand {
         name = "clear",
         after_help = CLEAR_EXAMPLES,
         about = "Clear the cached secrets of a profile.",
-        long_about = "Delete every cached secret of a profile from the keychain and forget that the profile was loaded.",
+        long_about = "Delete every cached secret of a profile from the keychain and forget that the profile was loaded. The next `load` fetches every secret from 1Password again. To delete only the secrets the config no longer names, use `profile prune`.",
         next_display_order = 3
     )]
     Clear(ProfileClearCommandArgs),
@@ -374,7 +374,7 @@ pub enum ProfileCommand {
         name = "prune",
         after_help = PRUNE_EXAMPLES,
         about = "Delete what keysafe keeps of secrets removed from the config.",
-        long_about = "Delete the cached secrets of a profile that its config no longer names, and remove the SSH keys keysafe added for them from ssh-agent. The profile stays loaded. For a profile removed from the config, everything keysafe kept of it is deleted. Variables already set in open shells stay; use `unload` there. `keysafe doctor` says when there is something to prune.",
+        long_about = "Delete the cached secrets of a profile that its config no longer names, and remove the SSH keys keysafe added for them from ssh-agent. The profile stays loaded. For a profile removed from the config, everything keysafe kept of it is deleted. Variables already set in open shells stay; use `unload` there. `keysafe doctor` says when there is something to prune. To delete every cached secret of a profile, use `profile clear`.",
         next_display_order = 4
     )]
     Prune(ProfilePruneCommandArgs),

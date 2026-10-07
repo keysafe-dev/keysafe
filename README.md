@@ -221,7 +221,7 @@ keysafe picks up where the zsh-op plugin left off:
 - With no config at the new location, `~/.config/op/config.yml` is used, with a hint to move it.
 - Profiles recorded in `~/.cache/op` count as loaded until you load them again.
 - Secrets cached under `op-secrets-<profile>` move to `keysafe.<profile>` the first time they are read; the old items are deleted.
-- Items zsh-op cached that keysafe never reads, such as secrets no longer in your config, stay behind. `keysafe doctor` warns about them and `keysafe profile clear <profile>` deletes them.
+- Items zsh-op cached that keysafe never reads, such as secrets no longer in your config, stay behind. `keysafe doctor` warns about them and `keysafe profile prune <profile>` deletes them.
 
 ## Troubleshooting
 
