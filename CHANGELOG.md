@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/keysafe-dev/keysafe/compare/v0.4.0...v0.5.0) (2026-10-07)
+
+
+### Features
+
+* clean up secrets removed from the config with `profile prune` ([#34](https://github.com/keysafe-dev/keysafe/issues/34)) ([01c105b](https://github.com/keysafe-dev/keysafe/commit/01c105b46d2d19d6f3346ab2c664a2bd33ceb9ce))
+* point config errors to the line of the invalid entry ([#37](https://github.com/keysafe-dev/keysafe/issues/37)) ([7e30eb9](https://github.com/keysafe-dev/keysafe/commit/7e30eb97ea25c81983a9dd29edcadc7fd722aba9)), closes [#35](https://github.com/keysafe-dev/keysafe/issues/35)
+
 ## [0.4.0](https://github.com/keysafe-dev/keysafe/compare/v0.3.1...v0.4.0) (2026-10-06)
 
 
