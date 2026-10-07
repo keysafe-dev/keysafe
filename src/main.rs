@@ -164,6 +164,12 @@ fn run(program: Program) -> Result<ExitCode> {
                 let mut command = ProfileClearCommand { cache };
                 command.execute(&args)?
             }
+            ProfileCommand::Prune(args) => {
+                let cache = cache(&args.parent);
+                let agent = Box::new(Agent::new());
+                let mut command = ProfilePruneCommand { cache, agent };
+                command.execute(&args)?
+            }
         },
         ProgramCommand::Config(args) => match args.command {
             ConfigCommand::Init(args) => {

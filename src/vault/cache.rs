@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::log::{debug, warn};
-use crate::vault::Profile;
+use crate::vault::{Profile, SecretKind};
 
 /// SecretStore persists secret values in a secure credential store.
 pub trait SecretStore {
@@ -211,6 +211,24 @@ impl Cache {
 
     /// Returns the secret names recorded for `profile`, or `None` if it was never loaded.
     pub fn loaded(&self, profile: &str) -> Result<Option<Vec<String>>> {
+        Ok(self
+            .metadata(profile)?
+            .map(|lines| lines.into_iter().map(|(_, name)| name).collect()))
+    }
+
+    /// Returns the secrets recorded for `profile` with their kind, which may no longer match
+    /// the config. Lines with a kind keysafe doesn't know are skipped.
+    pub fn loaded_secrets(&self, profile: &str) -> Result<Vec<(SecretKind, String)>> {
+        Ok(self
+            .metadata(profile)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(kind, name)| Some((kind.parse().ok()?, name)))
+            .collect())
+    }
+
+    /// Returns the `kind:name` lines recorded for `profile`, or `None` if it was never loaded.
+    fn metadata(&self, profile: &str) -> Result<Option<Vec<(String, String)>>> {
         for path in self.metadata_paths(profile) {
             let data = match std::fs::read_to_string(&path) {
                 Ok(data) => data,
@@ -218,16 +236,72 @@ impl Cache {
                 Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
             };
 
-            let names = data
+            let lines = data
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty() && !line.starts_with('#'))
                 // Parse: kind:name (e.g. "env:GITHUB_TOKEN" or "ssh:github-work")
-                .filter_map(|line| line.split_once(':').map(|(_, name)| name.to_string()))
+                .filter_map(|line| line.split_once(':'))
+                .map(|(kind, name)| (kind.to_string(), name.to_string()))
                 .collect();
-            return Ok(Some(names));
+            return Ok(Some(lines));
         }
         Ok(None)
+    }
+
+    /// Returns the profiles recorded as loaded, whether or not they are still configured.
+    pub fn profiles(&self) -> Result<Vec<String>> {
+        let mut profiles = Vec::new();
+        for dir in std::iter::once(&self.dir).chain(self.legacy_dir.iter()) {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).context(format!("failed to read {}", dir.display())),
+            };
+            for entry in entries {
+                let path = entry
+                    .with_context(|| format!("failed to read {}", dir.display()))?
+                    .path();
+                if path.extension().is_some_and(|ext| ext == "metadata") {
+                    if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                        profiles.push(name.to_string());
+                    }
+                }
+            }
+        }
+        profiles.sort();
+        profiles.dedup();
+        Ok(profiles)
+    }
+
+    /// Returns the secrets cached for `profile` whose names are not in `configured`.
+    pub fn orphaned(&self, profile: &str, configured: &[&str]) -> Result<Vec<String>> {
+        let mut names = self.store.accounts(&Self::service(profile))?;
+        names.retain(|name| !configured.contains(&name.as_str()));
+        Ok(names)
+    }
+
+    /// Deletes the secrets cached for `profile`, under either service, whose names are not in
+    /// `configured`. Returns the number of deleted secrets.
+    pub fn prune(&self, profile: &str, configured: &[&str]) -> Result<usize> {
+        let services = [Self::service(profile), Self::legacy_service(profile)];
+        let mut names = Vec::new();
+        for service in &services {
+            names.extend(self.store.accounts(service)?);
+        }
+        names.retain(|name| !configured.contains(&name.as_str()));
+        names.sort();
+        names.dedup();
+
+        let mut count = 0;
+        for name in &names {
+            let mut deleted = false;
+            for service in &services {
+                deleted |= self.store.delete(service, name)?;
+            }
+            count += usize::from(deleted);
+        }
+        Ok(count)
     }
 
     /// Records every secret of `account` as loaded.
@@ -536,6 +610,77 @@ mod tests {
             Some("c")
         );
         assert!(cache.legacy_items("personal").unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_deletes_only_items_the_config_no_longer_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::with(&[
+            ("keysafe.personal", "GITHUB_TOKEN", "a"),
+            ("keysafe.personal", "OLD_TOKEN", "b"),
+            ("op-secrets-personal", "OLDER_TOKEN", "c"),
+            ("keysafe.work", "OLD_TOKEN", "d"),
+        ]);
+        let cache = Cache::new(Box::new(store.clone()), dir.path());
+        cache.save(&account()).unwrap();
+        let configured = ["GITHUB_TOKEN", "my-key"];
+
+        // Only the current service is reported, zsh-op's has its own warning
+        assert_eq!(
+            cache.orphaned("personal", &configured).unwrap(),
+            ["OLD_TOKEN"]
+        );
+        assert_eq!(cache.prune("personal", &configured).unwrap(), 2);
+
+        assert_eq!(
+            store.value("keysafe.personal", "GITHUB_TOKEN").as_deref(),
+            Some("a")
+        );
+        assert_eq!(store.value("keysafe.personal", "OLD_TOKEN"), None);
+        assert_eq!(store.value("op-secrets-personal", "OLDER_TOKEN"), None);
+        assert_eq!(
+            store.value("keysafe.work", "OLD_TOKEN").as_deref(),
+            Some("d")
+        );
+        // The profile stays loaded
+        assert!(cache.loaded("personal").unwrap().is_some());
+    }
+
+    #[test]
+    fn loaded_secrets_keeps_the_recorded_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(Box::new(MemoryStore::default()), dir.path());
+        assert!(cache.loaded_secrets("personal").unwrap().is_empty());
+        std::fs::write(
+            cache.metadata_path("personal"),
+            "# Format: kind:name\n\nenv:OLD_TOKEN\nfile:GCP\nssh:old-key\nweird:X\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            cache.loaded_secrets("personal").unwrap(),
+            [
+                (SecretKind::Env, "OLD_TOKEN".to_string()),
+                (SecretKind::File, "GCP".to_string()),
+                (SecretKind::Ssh, "old-key".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn profiles_lists_current_and_legacy_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("op");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("old.metadata"), "env:A\n").unwrap();
+        std::fs::write(legacy.join("notes.txt"), "").unwrap();
+        let cache = Cache::new(Box::new(MemoryStore::default()), &dir.path().join("new"))
+            .with_legacy_dir(Some(legacy));
+        assert_eq!(cache.profiles().unwrap(), ["old"]);
+
+        cache.save(&account()).unwrap();
+
+        assert_eq!(cache.profiles().unwrap(), ["old", "personal"]);
     }
 
     #[test]

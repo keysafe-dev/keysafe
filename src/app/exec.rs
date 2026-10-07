@@ -261,42 +261,36 @@ impl UnloadCommand {
     pub fn execute(&mut self, args: &UnloadCommandArgs) -> Result<()> {
         let config = Config::read_from_file(&args.parent.config)?;
         let profile = config.resolve(args.profile.as_deref())?;
-        let secrets: Vec<&Secret> = if args.names.is_empty() {
-            profile.secrets.iter().collect()
-        } else {
-            args.names
-                .iter()
-                .map(|name| profile.secret(name))
-                .collect::<Result<_>>()?
-        };
+        let secrets = self.secrets(profile, &args.names)?;
         if args.output.export_format() == ExportFormat::Json {
             bail!("unload prints shell statements; use --format zsh or --format bash");
         }
 
         // Unset the variables, deleting the files of file secrets keysafe wrote. Without a way
         // to reach the shell, the variables stay, and so do the files they point to.
-        let variables: Vec<&Secret> = secrets
-            .iter()
-            .copied()
-            .filter(|s| s.is_variable())
-            .collect();
+        let mut variables: Vec<&str> = Vec::new();
+        for (kind, name) in &secrets {
+            if *kind != SecretKind::Ssh && !variables.contains(&name.as_str()) {
+                variables.push(name);
+            }
+        }
         let stranded = args.output.statements_stranded();
         if !stranded {
-            for secret in &variables {
-                if secret.kind == SecretKind::File {
-                    self.remove_file(profile, secret);
+            for name in &variables {
+                if secrets.contains(&(SecretKind::File, name.to_string())) {
+                    self.remove_file(&profile.name, name);
                 }
-                writeln!(self.writer, "unset {}", secret.name)?;
+                writeln!(self.writer, "unset {name}")?;
             }
         }
 
         // Remove the SSH keys keysafe added from the agent
-        let keys: Vec<&Secret> = secrets
+        let keys: Vec<&str> = secrets
             .iter()
-            .copied()
-            .filter(|s| s.kind == SecretKind::Ssh)
+            .filter(|(kind, _)| *kind == SecretKind::Ssh)
+            .map(|(_, name)| name.as_str())
             .collect();
-        let (removed, failed) = self.remove_keys(profile, &keys);
+        let (removed, failed) = remove_keys(&self.cache, self.agent.as_ref(), &profile.name, &keys);
 
         // SSH keys don't need the shell; variables do
         if stranded && !variables.is_empty() {
@@ -327,14 +321,55 @@ impl UnloadCommand {
         finish(failed)
     }
 
-    /// Deletes the file of the file secret `secret`, if its variable points to a file that
+    /// Returns the kind and name of the secrets to unload: the given `names`, or every secret
+    /// of `profile`. Besides the configured secrets, these include the secrets recorded as
+    /// loaded and the SSH keys keysafe added, even if they were removed from the config since.
+    fn secrets(&self, profile: &Profile, names: &[String]) -> Result<Vec<(SecretKind, String)>> {
+        let mut known: Vec<(SecretKind, String)> = profile
+            .secrets
+            .iter()
+            .map(|s| (s.kind, s.name.clone()))
+            .collect();
+        known.extend(self.cache.loaded_secrets(&profile.name)?);
+        match self.cache.keys() {
+            Ok(records) => known.extend(
+                records
+                    .into_iter()
+                    .filter(|r| r.profile == profile.name)
+                    .map(|r| (SecretKind::Ssh, r.name)),
+            ),
+            Err(err) => warn(format!("{err:#}")),
+        }
+        let mut secrets = Vec::new();
+        for secret in known {
+            if !secrets.contains(&secret) {
+                secrets.push(secret);
+            }
+        }
+        if names.is_empty() {
+            return Ok(secrets);
+        }
+
+        let mut selected = Vec::new();
+        for name in names {
+            let matching: Vec<_> = secrets.iter().filter(|(_, n)| n == name).collect();
+            if matching.is_empty() {
+                // Neither configured nor loaded: fails, listing the configured secrets
+                profile.secret(name)?;
+            }
+            selected.extend(matching.into_iter().cloned());
+        }
+        Ok(selected)
+    }
+
+    /// Deletes the file of the file secret `name`, if its variable points to a file that
     /// keysafe wrote (`<runtime dir>/files/<profile>/<name>`).
-    fn remove_file(&self, profile: &Profile, secret: &Secret) {
-        let Some(value) = self.environment.get(&secret.name) else {
+    fn remove_file(&self, profile: &str, name: &str) {
+        let Some(value) = self.environment.get(name) else {
             return;
         };
         let path = Path::new(value);
-        let written = Path::new("files").join(&profile.name).join(&secret.name);
+        let written = Path::new("files").join(profile).join(name);
         if path.ends_with(&written) {
             if let Err(err) = std::fs::remove_file(path) {
                 if err.kind() != std::io::ErrorKind::NotFound {
@@ -343,55 +378,60 @@ impl UnloadCommand {
             }
         }
     }
+}
 
-    /// Removes `keys` from the agent, if keysafe added them and the agent still holds them.
-    /// Returns the number of removed keys and of failures.
-    fn remove_keys(&self, profile: &Profile, keys: &[&Secret]) -> (usize, usize) {
-        if keys.is_empty() {
-            return (0, 0);
-        }
-        // Without a running agent, there is nothing to remove
-        let Ok(present) = self.agent.fingerprints() else {
-            return (0, 0);
-        };
-        let records = match self.cache.keys() {
-            Ok(records) => records,
-            Err(err) => {
-                warn(format!("{err:#}"));
-                return (0, keys.len());
-            }
-        };
-
-        let (mut removed, mut failed) = (Vec::new(), 0);
-        for key in keys {
-            let Some(record) = records.iter().find(|r| {
-                r.profile == profile.name && r.name == key.name && present.contains(&r.fingerprint)
-            }) else {
-                continue;
-            };
-            if record.public_key.is_empty() {
-                warn(format!(
-                    "SSH key '{}' was added by an older keysafe; remove it with `ssh-add -d`",
-                    key.name
-                ));
-                continue;
-            }
-            match self.agent.remove(&record.public_key) {
-                Ok(()) => removed.push(record.fingerprint.clone()),
-                Err(err) => {
-                    warn(format!("failed to remove SSH key '{}': {err:#}", key.name));
-                    failed += 1;
-                }
-            }
-        }
-
-        if !removed.is_empty() {
-            if let Err(err) = self.cache.drop_keys(&removed) {
-                warn(format!("{err:#}"));
-            }
-        }
-        (removed.len(), failed)
+/// Removes the SSH keys `names` of `profile` from `agent`, if keysafe added them and the agent
+/// still holds them. Returns the number of removed keys and of failures.
+fn remove_keys(
+    cache: &Cache,
+    agent: &dyn KeyAgent,
+    profile: &str,
+    names: &[&str],
+) -> (usize, usize) {
+    if names.is_empty() {
+        return (0, 0);
     }
+    // Without a running agent, there is nothing to remove
+    let Ok(present) = agent.fingerprints() else {
+        return (0, 0);
+    };
+    let records = match cache.keys() {
+        Ok(records) => records,
+        Err(err) => {
+            warn(format!("{err:#}"));
+            return (0, names.len());
+        }
+    };
+
+    let (mut removed, mut failed) = (Vec::new(), 0);
+    for name in names {
+        let Some(record) = records
+            .iter()
+            .find(|r| r.profile == profile && r.name == *name && present.contains(&r.fingerprint))
+        else {
+            continue;
+        };
+        if record.public_key.is_empty() {
+            warn(format!(
+                "SSH key '{name}' was added by an older keysafe; remove it with `ssh-add -d`"
+            ));
+            continue;
+        }
+        match agent.remove(&record.public_key) {
+            Ok(()) => removed.push(record.fingerprint.clone()),
+            Err(err) => {
+                warn(format!("failed to remove SSH key '{name}': {err:#}"));
+                failed += 1;
+            }
+        }
+    }
+
+    if !removed.is_empty() {
+        if let Err(err) = cache.drop_keys(&removed) {
+            warn(format!("{err:#}"));
+        }
+    }
+    (removed.len(), failed)
 }
 
 /// Print the value of a secret.
@@ -1029,6 +1069,23 @@ impl DoctorCommand {
                         );
                         self.report(Check::Warning, "Keychain", detail)?;
                     }
+
+                    // Secrets cached before they were removed from the config
+                    let configured: Vec<&str> =
+                        profile.secrets.iter().map(|s| s.name.as_str()).collect();
+                    let Ok(items) = self.cache.orphaned(&profile.name, &configured) else {
+                        continue;
+                    };
+                    if !items.is_empty() {
+                        let detail = format!(
+                            "{} under {}, no longer in the config: {} (remove them with `keysafe profile prune {}`)",
+                            count(items.len(), "orphaned item"),
+                            Cache::service(&profile.name),
+                            items.join(", "),
+                            profile.name
+                        );
+                        self.report(Check::Warning, "Keychain", detail)?;
+                    }
                 }
             }
             Err(err) => {
@@ -1037,17 +1094,67 @@ impl DoctorCommand {
             }
         }
 
-        // The SSH agent, if a profile has SSH keys
+        // Profiles loaded before they were removed from the config
+        if config.is_some() {
+            let recorded = self.cache.profiles().unwrap_or_default();
+            for name in recorded.iter().filter(|name| is_profile_name(name)) {
+                if !profiles.iter().any(|p| p.name == *name) {
+                    let detail = format!(
+                        "profile '{name}' is no longer in the config (remove what keysafe kept of it with `keysafe profile prune {name}`)"
+                    );
+                    self.report(Check::Warning, "Cache", detail)?;
+                }
+            }
+        }
+
+        // SSH keys keysafe added before they were removed from the config
+        let orphaned: Vec<KeyRecord> = match config {
+            Some(_) => self
+                .cache
+                .keys()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| {
+                    !profiles.iter().any(|p| {
+                        p.name == r.profile
+                            && p.secrets
+                                .iter()
+                                .any(|s| s.kind == SecretKind::Ssh && s.name == r.name)
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        // The SSH agent, if a profile has SSH keys or keysafe added some
         let has_keys = profiles
             .iter()
             .any(|p| p.secrets.iter().any(|s| s.kind == SecretKind::Ssh));
-        if has_keys {
+        if has_keys || !orphaned.is_empty() {
             match self.agent.fingerprints() {
-                Ok(keys) => self.report(
-                    Check::Ok,
-                    "SSH agent",
-                    format!("running, {} key(s)", keys.len()),
-                )?,
+                Ok(keys) => {
+                    if has_keys {
+                        self.report(
+                            Check::Ok,
+                            "SSH agent",
+                            format!("running, {} key(s)", keys.len()),
+                        )?;
+                    }
+                    let mut held: Vec<&KeyRecord> = orphaned
+                        .iter()
+                        .filter(|r| keys.contains(&r.fingerprint))
+                        .collect();
+                    held.sort_by(|a, b| (&a.profile, &a.name).cmp(&(&b.profile, &b.name)));
+                    for record in held {
+                        let detail = format!(
+                            "orphaned key '{}' of {}, no longer in the config (remove it with `keysafe profile prune {}`)",
+                            record.name, record.profile, record.profile
+                        );
+                        self.report(Check::Warning, "SSH agent", detail)?;
+                    }
+                }
+                // An agent that isn't running holds no orphaned keys
+                Err(_) if !has_keys => {}
                 Err(err) => {
                     failures += 1;
                     self.report(Check::Failure, "SSH agent", format!("{err:#}"))?;
@@ -1170,6 +1277,78 @@ impl ProfileClearCommand {
             account.name
         ));
         Ok(())
+    }
+}
+
+/// Delete what keysafe keeps of secrets removed from the config.
+pub struct ProfilePruneCommand {
+    /// Cache the orphaned secrets are deleted from.
+    pub cache: Cache,
+    /// Agent the orphaned SSH keys are removed from.
+    pub agent: Box<dyn KeyAgent>,
+}
+
+impl ProfilePruneCommand {
+    /// Execute the ProfilePruneCommand with the provided arguments.
+    pub fn execute(&mut self, args: &ProfilePruneCommandArgs) -> Result<()> {
+        let config = Config::read_from_file(&args.parent.config)?;
+        let name = args.profile.as_str();
+        // A profile removed from the config is pruned entirely, if keysafe kept anything of it
+        let profile = match config.profile(name) {
+            Ok(profile) => Some(profile),
+            Err(_) if is_profile_name(name) && self.kept(name)? => None,
+            Err(err) => return Err(err),
+        };
+        let secrets = profile.map(|p| p.secrets.as_slice()).unwrap_or_default();
+
+        let configured: Vec<&str> = secrets.iter().map(|s| s.name.as_str()).collect();
+        let pruned = self.cache.prune(name, &configured)?;
+
+        let keys: Vec<String> = self
+            .cache
+            .keys()?
+            .into_iter()
+            .filter(|r| r.profile == name)
+            .filter(|r| {
+                !secrets
+                    .iter()
+                    .any(|s| s.kind == SecretKind::Ssh && s.name == r.name)
+            })
+            .map(|r| r.name)
+            .collect();
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let (removed, failed) = remove_keys(&self.cache, self.agent.as_ref(), name, &keys);
+
+        if pruned > 0 {
+            success(format!(
+                "Pruned {} from {name}",
+                count(pruned, "orphaned secret")
+            ));
+        }
+        if removed > 0 {
+            success(format!(
+                "Removed {} from ssh-agent",
+                count(removed, "SSH key")
+            ));
+        }
+        let forgotten = profile.is_none() && self.cache.loaded(name)?.is_some();
+        if forgotten {
+            self.cache.forget(name)?;
+            success(format!("Forgot {name}, which is no longer in the config"));
+        }
+        if pruned == 0 && removed == 0 && !forgotten {
+            info(format!("Nothing to prune in {name}"));
+        }
+        finish(failed)
+    }
+
+    /// Returns true if keysafe kept anything of `profile`: cached secrets, a record that it
+    /// was loaded, or SSH keys it added.
+    fn kept(&self, profile: &str) -> Result<bool> {
+        Ok(self.cache.loaded(profile)?.is_some()
+            || !self.cache.orphaned(profile, &[])?.is_empty()
+            || !self.cache.legacy_items(profile)?.is_empty()
+            || self.cache.keys()?.iter().any(|r| r.profile == profile))
     }
 }
 
@@ -2352,6 +2531,83 @@ mod tests {
     }
 
     #[test]
+    fn unload_unsets_secrets_removed_from_the_config() -> Result<()> {
+        let fixture = Fixture::new().loaded(
+            "personal",
+            "env:GITHUB_TOKEN\nenv:OLD_TOKEN\nfile:OLD_FILE\n",
+        );
+        let file =
+            RuntimeDir::new(Some(fixture.runtime_dir())).write("personal", "OLD_FILE", "{}")?;
+        let writer = Writer::new();
+        let mut cmd = UnloadCommand {
+            writer: Box::new(writer.clone()),
+            ..unload(
+                &fixture,
+                agent(vec![]),
+                &[("OLD_FILE", &file.to_string_lossy())],
+            )
+        };
+
+        cmd.execute(&unload_args(&fixture, &[]))?;
+
+        assert_eq!(
+            writer.contents(),
+            "unset GITHUB_TOKEN\nunset GCP_CREDENTIALS\nunset OLD_TOKEN\nunset OLD_FILE\n"
+        );
+        assert!(!file.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unload_names_secrets_removed_from_the_config() -> Result<()> {
+        let fixture = Fixture::new().loaded("personal", "env:OLD_TOKEN\n");
+        let writer = Writer::new();
+        let mut cmd = UnloadCommand {
+            writer: Box::new(writer.clone()),
+            ..unload(&fixture, MockKeyAgent::new(), &[])
+        };
+
+        cmd.execute(&unload_args(&fixture, &["OLD_TOKEN"]))?;
+        let unknown = cmd.execute(&unload_args(&fixture, &["NEVER_LOADED"]));
+
+        assert_eq!(writer.contents(), "unset OLD_TOKEN\n");
+        assert!(unknown
+            .unwrap_err()
+            .to_string()
+            .starts_with("secret 'NEVER_LOADED' not found in profile 'personal'"));
+        Ok(())
+    }
+
+    #[test]
+    fn unload_removes_keys_removed_from_the_config() -> Result<()> {
+        let fixture = Fixture::new();
+        let key = fingerprint(&TEST_KEY)?;
+        let public = public_key(&TEST_KEY)?;
+        fixture.cache().record_keys(
+            &[KeyRecord {
+                profile: "personal".into(),
+                name: "old-key".into(),
+                fingerprint: key.clone(),
+                public_key: public.clone(),
+                expires: u64::MAX,
+            }],
+            0,
+        )?;
+        let mut agent = agent(vec![key]);
+        agent
+            .expect_remove()
+            .withf(move |k| k == public)
+            .times(1)
+            .returning(|_| Ok(()));
+        let mut cmd = unload(&fixture, agent, &[]);
+
+        cmd.execute(&unload_args(&fixture, &[]))?;
+
+        assert_eq!(fixture.cache().keys()?, vec![]);
+        Ok(())
+    }
+
+    #[test]
     fn unload_rejects_json() {
         let fixture = Fixture::new();
         let mut cmd = unload(&fixture, MockKeyAgent::new(), &[]);
@@ -2768,6 +3024,137 @@ mod tests {
                 ..Default::default()
             }
         );
+        Ok(())
+    }
+
+    fn prune_args(fixture: &Fixture, profile: &str) -> ProfilePruneCommandArgs {
+        ProfilePruneCommandArgs {
+            parent: fixture.parent(),
+            profile: profile.into(),
+        }
+    }
+
+    #[test]
+    fn profile_prune_deletes_what_the_config_no_longer_names() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "GITHUB_TOKEN", "a")
+            .cached("personal", "OLD_TOKEN", "b")
+            .loaded("personal", "env:GITHUB_TOKEN\nenv:OLD_TOKEN\n");
+        let key = fingerprint(&TEST_KEY)?;
+        let public = public_key(&TEST_KEY)?;
+        let record = |name: &str| KeyRecord {
+            profile: "personal".into(),
+            name: name.into(),
+            fingerprint: format!("{key}-{name}"),
+            public_key: public.clone(),
+            expires: u64::MAX,
+        };
+        fixture
+            .cache()
+            .record_keys(&[record("my-key"), record("old-key")], 0)?;
+        let mut agent = agent(vec![format!("{key}-my-key"), format!("{key}-old-key")]);
+        agent.expect_remove().times(1).returning(|_| Ok(()));
+        let mut cmd = ProfilePruneCommand {
+            cache: fixture.cache(),
+            agent: Box::new(agent),
+        };
+
+        cmd.execute(&prune_args(&fixture, "personal"))?;
+
+        assert_eq!(
+            fixture.value("personal", "GITHUB_TOKEN").as_deref(),
+            Some("a")
+        );
+        assert_eq!(fixture.value("personal", "OLD_TOKEN"), None);
+        assert_eq!(fixture.cache().keys()?, vec![record("my-key")]);
+        // The profile stays loaded, and unload still knows about OLD_TOKEN
+        assert!(fixture.cache().loaded("personal")?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn profile_prune_deletes_a_profile_removed_from_the_config() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("old", "TOKEN", "a")
+            .cached("personal", "GITHUB_TOKEN", "b")
+            .loaded("old", "env:TOKEN\n");
+        let mut cmd = ProfilePruneCommand {
+            cache: fixture.cache(),
+            agent: Box::new(MockKeyAgent::new()),
+        };
+
+        cmd.execute(&prune_args(&fixture, "old"))?;
+
+        assert_eq!(fixture.value("old", "TOKEN"), None);
+        assert_eq!(
+            fixture.value("personal", "GITHUB_TOKEN").as_deref(),
+            Some("b")
+        );
+        assert_eq!(fixture.cache().loaded("old")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn profile_prune_rejects_profiles_keysafe_knows_nothing_of() {
+        let fixture = Fixture::new();
+        let mut cmd = ProfilePruneCommand {
+            cache: fixture.cache(),
+            agent: Box::new(MockKeyAgent::new()),
+        };
+
+        for name in ["typo", "../escape"] {
+            let result = cmd.execute(&prune_args(&fixture, name));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .starts_with(&format!("profile '{name}' not found in config")));
+        }
+    }
+
+    #[test]
+    fn doctor_warns_about_what_the_config_no_longer_names() -> Result<()> {
+        let fixture = Fixture::new()
+            .cached("personal", "OLD_TOKEN", "a")
+            .loaded("old", "env:TOKEN\n");
+        fixture.cache().record_keys(
+            &[
+                KeyRecord {
+                    profile: "personal".into(),
+                    name: "old-key".into(),
+                    fingerprint: "SHA256:a".into(),
+                    public_key: "ssh-ed25519 AAAA".into(),
+                    expires: u64::MAX,
+                },
+                KeyRecord {
+                    profile: "personal".into(),
+                    name: "gone-from-agent".into(),
+                    fingerprint: "SHA256:b".into(),
+                    public_key: "ssh-ed25519 BBBB".into(),
+                    expires: u64::MAX,
+                },
+            ],
+            0,
+        )?;
+        let mut client = MockSecretClient::new();
+        client.expect_check().returning(|_| Ok("fine".into()));
+        let (mut cmd, writer) = doctor(&fixture, client, agent(vec!["SHA256:a".into()]));
+
+        cmd.execute(&DoctorCommandArgs {
+            parent: fixture.parent(),
+            shell: Some(Shell::Zsh),
+        })?;
+
+        let output = writer.contents();
+        assert!(output.contains(
+            "! Keychain: 1 orphaned item under keysafe.personal, no longer in the config: OLD_TOKEN (remove them with `keysafe profile prune personal`)\n"
+        ));
+        assert!(output.contains(
+            "! Cache: profile 'old' is no longer in the config (remove what keysafe kept of it with `keysafe profile prune old`)\n"
+        ));
+        assert!(output.contains(
+            "! SSH agent: orphaned key 'old-key' of personal, no longer in the config (remove it with `keysafe profile prune personal`)\n"
+        ));
+        assert!(!output.contains("gone-from-agent"));
         Ok(())
     }
 

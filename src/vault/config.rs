@@ -144,12 +144,7 @@ impl TryFrom<Spec> for Config {
                 .name
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow!("profile at index {i} missing 'name' field"))?;
-            // Profile names are used in file paths and keychain service names.
-            if name.starts_with('.')
-                || !name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-            {
+            if !is_profile_name(&name) {
                 bail!("profile name '{name}' may only contain letters, digits, '.', '_' and '-'");
             }
             if profiles.iter().any(|a: &Profile| a.name == name) {
@@ -223,6 +218,16 @@ impl TryFrom<Spec> for Config {
 
         Ok(Config { profiles })
     }
+}
+
+/// Returns true if `name` can name a profile. Profile names are used in file paths and
+/// keychain service names.
+pub fn is_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Returns true if `name` is a valid shell environment variable name.
