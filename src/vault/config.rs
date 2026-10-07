@@ -84,7 +84,7 @@ impl Config {
     /// Parses and validates configuration content.
     pub fn parse(data: &str) -> Result<Config> {
         let spec: Spec = serde_yaml_ng::from_str(data)?;
-        Self::try_from(spec)
+        Self::from_spec(spec, data)
     }
 
     /// Returns the default profile: the one marked `default: true`, or else the first one.
@@ -119,10 +119,9 @@ impl Config {
     }
 }
 
-impl TryFrom<Spec> for Config {
-    type Error = anyhow::Error;
-
-    fn try_from(spec: Spec) -> Result<Self> {
+impl Config {
+    /// Validates `spec`, parsed from `data`, which is used to point errors to their line.
+    fn from_spec(spec: Spec, data: &str) -> Result<Self> {
         let version = match spec.version {
             Some(serde_yaml_ng::Value::Number(n)) => n.to_string(),
             Some(serde_yaml_ng::Value::String(s)) => s,
@@ -140,10 +139,19 @@ impl TryFrom<Spec> for Config {
 
         let mut profiles = Vec::new();
         for (i, profile) in spec.profiles.into_iter().enumerate() {
-            let name = profile
-                .name
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("profile at index {i} missing 'name' field"))?;
+            let line = || line_of(data, &[Step::Key("profiles"), Step::Index(i)]);
+            let Some(name) = profile.name.filter(|s| !s.is_empty()) else {
+                let mut missing = vec!["name"];
+                if profile.provider.is_none() {
+                    missing.push("provider");
+                }
+                bail!(
+                    "profile #{}{} is missing {}",
+                    i + 1,
+                    details(line(), &[]),
+                    fields(&missing)
+                );
+            };
             if !is_profile_name(&name) {
                 bail!("profile name '{name}' may only contain letters, digits, '.', '_' and '-'");
             }
@@ -153,19 +161,55 @@ impl TryFrom<Spec> for Config {
             if profile.account.is_some() {
                 bail!("profile '{name}' has 'account': move it into its provider (provider: {{ type: 1password, account: ... }})");
             }
-            let provider: Provider = profile
-                .provider
-                .ok_or_else(|| anyhow!("profile '{name}' missing 'provider' field"))?
-                .into();
+            let Some(provider) = profile.provider else {
+                bail!(
+                    "profile '{name}'{} is missing 'provider'",
+                    details(line(), &[])
+                );
+            };
+            let provider: Provider = provider.into();
 
             let mut secrets = Vec::new();
             for (j, secret) in profile.secrets.unwrap_or_default().into_iter().enumerate() {
-                let kind = secret.kind.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    anyhow!("secret at profile '{name}' index {j} missing 'kind' field")
-                })?;
-                let secret_name = secret.name.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    anyhow!("secret at profile '{name}' index {j} missing 'name' field")
-                })?;
+                let fields_of = (
+                    secret.kind.filter(|s| !s.is_empty()),
+                    secret.name.filter(|s| !s.is_empty()),
+                    secret.path.filter(|s| !s.is_empty()),
+                );
+                let (kind, secret_name, path) = match fields_of {
+                    (Some(kind), Some(secret_name), Some(path)) => (kind, secret_name, path),
+                    (kind, secret_name, path) => {
+                        let missing: Vec<&str> =
+                            [("kind", &kind), ("name", &secret_name), ("path", &path)]
+                                .into_iter()
+                                .filter(|(_, value)| value.is_none())
+                                .map(|(field, _)| field)
+                                .collect();
+                        // Name the secret if it has a name, else say where it is and what it has
+                        let label = match &secret_name {
+                            Some(secret_name) => format!("secret '{secret_name}'"),
+                            None => format!("secret #{}", j + 1),
+                        };
+                        let mut present = Vec::new();
+                        if let Some(kind) = &kind {
+                            present.push(format!("kind: {kind}"));
+                        }
+                        if let (None, Some(path)) = (&secret_name, &path) {
+                            present.push(format!("path: {path}"));
+                        }
+                        let path = [
+                            Step::Key("profiles"),
+                            Step::Index(i),
+                            Step::Key("secrets"),
+                            Step::Index(j),
+                        ];
+                        bail!(
+                            "{label} in profile '{name}'{} is missing {}",
+                            details(line_of(data, &path), &present),
+                            fields(&missing)
+                        );
+                    }
+                };
                 let kind = kind.parse::<SecretKind>().map_err(|_| {
                     anyhow!(
                         "secret '{secret_name}' has invalid kind: {kind} (valid kinds: env, ssh, file)"
@@ -178,9 +222,6 @@ impl TryFrom<Spec> for Config {
                         "{kind} secret '{secret_name}' must use a valid environment variable name"
                     );
                 }
-                let path = secret.path.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    anyhow!("secret '{secret_name}' in profile '{name}' missing 'path' field")
-                })?;
                 let scheme = provider.scheme();
                 if !path.starts_with(scheme) {
                     bail!("secret '{secret_name}' has invalid path: {path} (path must start with '{scheme}' for provider {provider})");
@@ -235,6 +276,100 @@ fn is_variable_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Returns the parenthesized `line` and `present` fields of an invalid entry, or nothing if
+/// there are none.
+fn details(line: Option<usize>, present: &[String]) -> String {
+    let details: Vec<String> = line
+        .map(|line| format!("line {line}"))
+        .into_iter()
+        .chain(present.iter().cloned())
+        .collect();
+    match details.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", details.join(", ")),
+    }
+}
+
+/// Returns the quoted field `names`, e.g. `'name' and 'path'`.
+fn fields(names: &[&str]) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("'{name}'")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => quoted.join(""),
+    }
+}
+
+/// A step of the path to a node in the config: a mapping key or a sequence index.
+enum Step<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// Returns the line of the node at `path` in the YAML `data`, if there is one.
+///
+/// serde_yaml_ng doesn't keep the position of what it parses, but it does stamp errors with
+/// the position of the mapping or sequence they are raised in. So `data` is read again and an
+/// error is raised on purpose once the node is reached.
+fn line_of(data: &str, path: &[Step]) -> Option<usize> {
+    use serde::de::DeserializeSeed;
+
+    let deserializer = serde_yaml_ng::Deserializer::from_str(data);
+    match Locate(path).deserialize(deserializer) {
+        Ok(()) => None,
+        Err(err) => err.location().map(|location| location.line()),
+    }
+}
+
+/// Walks the rest of a [`Step`] path and fails at its end.
+struct Locate<'a, 'p>(&'p [Step<'a>]);
+
+impl<'de> serde::de::DeserializeSeed<'de> for Locate<'_, '_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        match self.0.first() {
+            Some(Step::Index(_)) => deserializer.deserialize_seq(self),
+            _ => deserializer.deserialize_map(self),
+        }
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Locate<'_, '_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "a mapping or a sequence")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let Some((Step::Key(key), rest)) = self.0.split_first() else {
+            return Err(serde::de::Error::custom("found"));
+        };
+        while let Some(found) = map.next_key::<serde_yaml_ng::Value>()? {
+            if found.as_str() == Some(*key) {
+                map.next_value_seed(Locate(rest))?;
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let Some((Step::Index(index), rest)) = self.0.split_first() else {
+            return Err(serde::de::Error::custom("found"));
+        };
+        for _ in 0..*index {
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_none() {
+                return Ok(());
+            }
+        }
+        seq.next_element_seed(Locate(rest))?;
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(())
+    }
 }
 
 /// A profile: a provider and the secrets loaded from it.
@@ -443,7 +578,7 @@ mod tests {
     fn parse_fails_when_account_name_is_missing() {
         assert_eq!(
             parse_err("version: 1\nprofiles:\n  - account: a.1password.com\n"),
-            "profile at index 0 missing 'name' field"
+            "profile #1 (line 3) is missing 'name' and 'provider'"
         );
     }
 
@@ -543,7 +678,7 @@ mod tests {
     fn parse_fails_when_provider_is_missing() {
         assert_eq!(
             parse_err("version: 1\nprofiles:\n  - name: p\n"),
-            "profile 'p' missing 'provider' field"
+            "profile 'p' (line 3) is missing 'provider'"
         );
     }
 
@@ -552,7 +687,7 @@ mod tests {
         let data = with_secrets("      - name: A\n        path: op://v/i/f\n");
         assert_eq!(
             parse_err(&data),
-            "secret at profile 'p' index 0 missing 'kind' field"
+            "secret 'A' in profile 'p' (line 8) is missing 'kind'"
         );
     }
 
@@ -570,7 +705,7 @@ mod tests {
         let data = with_secrets("      - kind: env\n        path: op://v/i/f\n");
         assert_eq!(
             parse_err(&data),
-            "secret at profile 'p' index 0 missing 'name' field"
+            "secret #1 in profile 'p' (line 8, kind: env, path: op://v/i/f) is missing 'name'"
         );
     }
 
@@ -579,8 +714,54 @@ mod tests {
         let data = with_secrets("      - kind: env\n        name: A\n");
         assert_eq!(
             parse_err(&data),
-            "secret 'A' in profile 'p' missing 'path' field"
+            "secret 'A' in profile 'p' (line 8, kind: env) is missing 'path'"
         );
+    }
+
+    #[test]
+    fn parse_points_to_a_half_deleted_secret() {
+        let data = with_secrets(concat!(
+            "      - kind: env\n        name: A\n        path: op://v/i/a\n",
+            "      # B was here\n",
+            "      - kind: env\n        name: C\n        path: op://v/i/c\n",
+            "\n",
+            "      - kind: env\n",
+            "      - kind: env\n        name: D\n        path: op://v/i/d\n",
+        ));
+        assert_eq!(
+            parse_err(&data),
+            "secret #3 in profile 'p' (line 16, kind: env) is missing 'name' and 'path'"
+        );
+    }
+
+    #[test]
+    fn parse_reports_every_missing_field() {
+        let data = with_secrets(
+            "      - {}
+",
+        );
+        assert_eq!(
+            parse_err(&data),
+            "secret #1 in profile 'p' (line 8) is missing 'kind', 'name' and 'path'"
+        );
+    }
+
+    #[test]
+    fn line_of_finds_nodes_in_any_style() {
+        let data = "a: 1
+list: [{x: 1},
+  {y: 2}]
+map:
+  key:
+    - 1
+";
+        assert_eq!(line_of(data, &[Step::Key("list"), Step::Index(1)]), Some(3));
+        assert_eq!(
+            line_of(data, &[Step::Key("map"), Step::Key("key")]),
+            Some(6)
+        );
+        assert_eq!(line_of(data, &[Step::Key("list"), Step::Index(5)]), None);
+        assert_eq!(line_of(data, &[Step::Key("missing")]), None);
     }
 
     #[test]
