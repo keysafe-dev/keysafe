@@ -5,13 +5,13 @@ mod cache;
 mod client;
 mod config;
 mod loader;
+mod macos;
 mod runtime;
-mod security;
 
 pub use agent::*;
 pub use cache::*;
 pub use client::*;
 pub use config::*;
 pub use loader::*;
+pub use macos::*;
 pub use runtime::*;
-pub use security::*;
