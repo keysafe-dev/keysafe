@@ -223,9 +223,22 @@ fn statements(output: &OutputArgs) -> Box<dyn Write> {
 }
 
 /// Returns the keychain-backed cache keeping its metadata in the state directory.
+///
+/// The keychain backend comes from the config. Commands that do not need the config and
+/// `doctor` must work without a valid one, so a missing or invalid config means the default
+/// backend; the commands that need the config report what is wrong with it.
 fn cache(parent: &ProgramArgs) -> Cache {
-    Cache::new(Box::new(Keychain::new()), &parent.state_dir)
-        .with_legacy_dir(parent.legacy_state_dir())
+    let backend = Config::read_from_file(&parent.config)
+        .map(|config| config.keychain)
+        .unwrap_or_else(|err| {
+            log::debug(format!("using the default keychain backend: {err:#}"));
+            KeychainBackend::default()
+        });
+    let store: Box<dyn SecretStore> = match backend {
+        KeychainBackend::Native => Box::new(Keychain::new()),
+        KeychainBackend::Security => Box::new(SecurityKeychain::new()),
+    };
+    Cache::new(store, &parent.state_dir).with_legacy_dir(parent.legacy_state_dir())
 }
 
 /// Returns a loader reading from the keychain cache and the 1Password CLI.

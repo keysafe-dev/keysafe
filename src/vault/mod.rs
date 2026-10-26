@@ -6,6 +6,7 @@ mod client;
 mod config;
 mod loader;
 mod runtime;
+mod security;
 
 pub use agent::*;
 pub use cache::*;
@@ -13,3 +14,4 @@ pub use client::*;
 pub use config::*;
 pub use loader::*;
 pub use runtime::*;
+pub use security::*;

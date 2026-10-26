@@ -1053,7 +1053,8 @@ impl DoctorCommand {
         // The keychain: looking up a missing item needs the store, but never prompts
         match self.cache.store.get("keysafe.doctor", "check") {
             Ok(_) => {
-                self.report(Check::Ok, "Keychain", "reachable")?;
+                let detail = format!("reachable, using {}", self.cache.store.describe());
+                self.report(Check::Ok, "Keychain", detail)?;
 
                 for profile in profiles {
                     let configured: Vec<&str> =
@@ -2782,7 +2783,7 @@ mod tests {
                 ✓ Config: {} (set by --config), 2 profile(s)
                 ✓ 1password (personal): checked OnePassword {{ account: Some(\"my.1password.com\") }}
                 ✓ 1password (work): checked OnePassword {{ account: Some(\"team.1password.com\") }}
-                ✓ Keychain: reachable
+                ✓ Keychain: reachable, using memory
                 ✓ SSH agent: running, 1 key(s)
                 ✓ Shell integration: active (zsh)
             "},
@@ -2844,7 +2845,7 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "found 1 problem(s)");
         let output = writer.contents();
         assert!(output.starts_with("✗ Config: config file not found: "));
-        assert!(output.contains("✓ Keychain: reachable\n"));
+        assert!(output.contains("✓ Keychain: reachable, using memory\n"));
         assert!(output.ends_with("✓ Shell integration: active (bash)\n"));
     }
 

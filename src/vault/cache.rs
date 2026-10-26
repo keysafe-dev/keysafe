@@ -11,6 +11,8 @@ use crate::vault::{Profile, SecretKind};
 
 /// SecretStore persists secret values in a secure credential store.
 pub trait SecretStore {
+    /// Describes what the values are stored with, for `doctor`.
+    fn describe(&self) -> String;
     /// Returns the value stored for `service` / `account`, or `None` if there is none.
     fn get(&self, service: &str, account: &str) -> Result<Option<String>>;
     /// Stores `value` for `service` / `account`, replacing any existing value.
@@ -67,6 +69,14 @@ fn open_store() -> keyring_core::Result<()> {
 }
 
 impl SecretStore for Keychain {
+    fn describe(&self) -> String {
+        if cfg!(target_os = "macos") {
+            "the Security framework".to_string()
+        } else {
+            "the Secret Service".to_string()
+        }
+    }
+
     fn accounts(&self, service: &str) -> Result<Vec<String>> {
         Self::open()?;
         // A search returns the items' attributes only, so it never prompts for access
@@ -461,6 +471,10 @@ impl MemoryStore {
 
 #[cfg(test)]
 impl SecretStore for MemoryStore {
+    fn describe(&self) -> String {
+        "memory".to_string()
+    }
+
     fn get(&self, service: &str, account: &str) -> Result<Option<String>> {
         let key = (service.to_string(), account.to_string());
         Ok(self.0.borrow().get(&key).cloned())
