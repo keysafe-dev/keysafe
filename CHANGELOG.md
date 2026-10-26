@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/keysafe-dev/keysafe/compare/v0.5.0...v0.6.0) (2026-10-26)
+
+
+### Features
+
+* add an optional /usr/bin/security keychain backend ([#45](https://github.com/keysafe-dev/keysafe/issues/45)) ([04ebe05](https://github.com/keysafe-dev/keysafe/commit/04ebe05d50544373ea65fd71ec2886b3d6561e1f))
+
 ## [0.5.0](https://github.com/keysafe-dev/keysafe/compare/v0.4.0...v0.5.0) (2026-10-07)
 
 
