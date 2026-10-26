@@ -12,6 +12,30 @@ struct Spec {
     profiles: Vec<ProfileSpec>,
     /// Profiles in the zsh-op format, which named them accounts.
     accounts: Option<serde_yaml_ng::Value>,
+    /// How secrets are stored in the keychain.
+    keychain: Option<KeychainSpec>,
+}
+
+/// Raw representation of the keychain settings, before validation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeychainSpec {
+    backend: Option<KeychainBackend>,
+}
+
+/// KeychainBackend specifies how secrets are stored in the keychain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeychainBackend {
+    /// The platform credential store, through its API: the Security framework on macOS and
+    /// the Secret Service on Linux. macOS ties an item to the binary that wrote it, so the
+    /// prompt returns after a rebuilt keysafe.
+    #[default]
+    Native,
+
+    /// `/usr/bin/security` (macOS only). Its signature is stable, so "Always Allow" lasts,
+    /// but any process of the user can read the items without a prompt.
+    Security,
 }
 
 /// Raw representation of a configured profile, before validation.
@@ -62,6 +86,8 @@ struct SecretSpec {
 pub struct Config {
     /// Configured profiles.
     pub profiles: Vec<Profile>,
+    /// How secrets are stored in the keychain.
+    pub keychain: KeychainBackend,
 }
 
 impl Config {
@@ -257,7 +283,9 @@ impl Config {
             );
         }
 
-        Ok(Config { profiles })
+        let keychain = spec.keychain.and_then(|k| k.backend).unwrap_or_default();
+
+        Ok(Config { profiles, keychain })
     }
 }
 
@@ -534,6 +562,44 @@ mod tests {
             vec![SecretKind::Env, SecretKind::Ssh, SecretKind::File]
         );
         assert!(config.profile("work").unwrap().secrets.is_empty());
+    }
+
+    #[test]
+    fn parse_defaults_to_the_native_keychain_backend() {
+        assert_eq!(
+            Config::parse(VALID).unwrap().keychain,
+            KeychainBackend::Native
+        );
+        let data = format!("{VALID}keychain:\n");
+        assert_eq!(
+            Config::parse(&data).unwrap().keychain,
+            KeychainBackend::Native
+        );
+    }
+
+    #[test]
+    fn parse_reads_the_keychain_backend() {
+        let data = format!("{VALID}keychain:\n  backend: security\n");
+        assert_eq!(
+            Config::parse(&data).unwrap().keychain,
+            KeychainBackend::Security
+        );
+        let data = format!("{VALID}keychain:\n  backend: native\n");
+        assert_eq!(
+            Config::parse(&data).unwrap().keychain,
+            KeychainBackend::Native
+        );
+    }
+
+    #[test]
+    fn parse_fails_on_an_unknown_keychain_backend() {
+        let data = format!("{VALID}keychain:\n  backend: vault\n");
+        let err = parse_err(&data);
+        assert!(err.contains("unknown variant `vault`"), "{err}");
+        assert!(err.contains("native"), "{err}");
+
+        let data = format!("{VALID}keychain:\n  name: x\n");
+        assert!(parse_err(&data).contains("unknown field `name`"));
     }
 
     #[test]

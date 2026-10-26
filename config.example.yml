@@ -6,6 +6,13 @@
 
 version: 1
 
+# macOS: how secrets are stored in the keychain.
+#   native   (default) through the Security framework; the prompt returns after keysafe is rebuilt
+#   security through /usr/bin/security; "Always Allow" lasts, but any process of yours can read the
+#            items without a prompt
+# keychain:
+#   backend: security
+
 profiles:
   # Personal 1Password account
   - name: personal

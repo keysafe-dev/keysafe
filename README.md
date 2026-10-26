@@ -99,6 +99,17 @@ Commands use the profile marked `default: true`, or the first profile, when you 
 
 Secret names of `env` and `file` secrets must be valid environment variable names; SSH key names can be any label.
 
+### Keychain backend (macOS)
+
+```yaml
+keychain:
+  backend: security   # native (default) or security
+```
+
+`native` reads and writes the keychain through the Security framework. macOS ties each item to the binary that wrote it, so a `keysafe` that is rebuilt or upgraded without a stable signature (a build from source, or through Nix) asks for access to every item again.
+
+`security` goes through `/usr/bin/security`, an Apple-signed binary whose identity never changes, so one **Always Allow** lasts across rebuilds. Secret values are passed to it on stdin, never as arguments. The trade-off is isolation: `/usr/bin/security` is trusted without a password, so any process running as you can run `security find-generic-password` and read these items without a prompt. `native` prompts for other apps. Items written by `native` still trust `keysafe`, so the first read through `security` prompts once; to re-cache them under the new access list run `keysafe profile clear <profile>` and then `keysafe load -r -p <profile>`. `keysafe doctor` reports the backend in use. Only macOS has this backend; Linux always uses the Secret Service.
+
 ### Environment Variables
 
 | Variable | Default | Description |
@@ -237,7 +248,7 @@ Start with `keysafe doctor`. It checks the config, the 1Password CLI and your ac
 
 **"not signed in to 1Password account"**: run `op signin --account my.1password.com`.
 
-**macOS asks to allow `keysafe` access to the keychain**: secrets cached by other programs (for example older zsh-op versions, which used `/usr/bin/security`) need your approval once per item. Choose **Always Allow**. Locally built binaries are not signed with a stable identity, so the prompt can come back after an upgrade. Alternatively, run `keysafe profile clear <profile>` and then `keysafe load -r -p <profile>` to re-cache the secrets.
+**macOS asks to allow `keysafe` access to the keychain**: secrets cached by other programs (for example older zsh-op versions, which used `/usr/bin/security`) need your approval once per item. Choose **Always Allow**. Locally built binaries are not signed with a stable identity, so the prompt can come back after an upgrade; set `keychain: {backend: security}` in the config to store the secrets through `/usr/bin/security` instead (see [Keychain backend](#keychain-backend-macos)). Alternatively, run `keysafe profile clear <profile>` and then `keysafe load -r -p <profile>` to re-cache the secrets.
 
 **"SSH agent is not running"**: start one with `eval $(ssh-agent)`.
 
