@@ -34,8 +34,29 @@ pub enum KeychainBackend {
     Native,
 
     /// `/usr/bin/security` (macOS only). Its signature is stable, so "Always Allow" lasts,
-    /// but any process of the user can read the items without a prompt.
+    /// but any process of the user can read the items without a prompt. On other platforms
+    /// it falls back to `Native`, see [`KeychainBackend::resolve`], so one config file can
+    /// be shared between macOS and Linux.
     Security,
+}
+
+impl KeychainBackend {
+    /// Returns the backend to use on this platform, and a warning when it differs from the
+    /// configured one.
+    pub fn resolve(self) -> (KeychainBackend, Option<&'static str>) {
+        self.resolve_on(cfg!(target_os = "macos"))
+    }
+
+    /// Same as [`KeychainBackend::resolve`], for a platform that is or is not macOS.
+    fn resolve_on(self, macos: bool) -> (KeychainBackend, Option<&'static str>) {
+        match self {
+            KeychainBackend::Security if !macos => (
+                KeychainBackend::Native,
+                Some("keychain backend `security` is macOS only; using `native` instead"),
+            ),
+            backend => (backend, None),
+        }
+    }
 }
 
 /// Raw representation of a configured profile, before validation.
@@ -589,6 +610,24 @@ mod tests {
             Config::parse(&data).unwrap().keychain,
             KeychainBackend::Native
         );
+    }
+
+    #[test]
+    fn resolve_falls_back_to_native_outside_macos() {
+        let (backend, warning) = KeychainBackend::Security.resolve_on(false);
+        assert_eq!(backend, KeychainBackend::Native);
+        assert!(warning.unwrap().contains("macOS only"));
+
+        assert_eq!(
+            KeychainBackend::Security.resolve_on(true),
+            (KeychainBackend::Security, None)
+        );
+        for macos in [true, false] {
+            assert_eq!(
+                KeychainBackend::Native.resolve_on(macos),
+                (KeychainBackend::Native, None)
+            );
+        }
     }
 
     #[test]

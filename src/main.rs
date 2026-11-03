@@ -234,6 +234,10 @@ fn cache(parent: &ProgramArgs) -> Cache {
             log::debug(format!("using the default keychain backend: {err:#}"));
             KeychainBackend::default()
         });
+    let (backend, warning) = backend.resolve();
+    if let Some(warning) = warning {
+        log::warn(warning);
+    }
     let store: Box<dyn SecretStore> = match backend {
         KeychainBackend::Native => Box::new(Keychain::new()),
         KeychainBackend::Security => Box::new(SecurityKeychain::new()),
