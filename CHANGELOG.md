@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/keysafe-dev/keysafe/compare/v0.6.0...v0.6.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **ci:** merge with the App token so main gets its CI run ([#50](https://github.com/keysafe-dev/keysafe/issues/50)) ([8d53127](https://github.com/keysafe-dev/keysafe/commit/8d53127ef59a314a9a84c08429f2c282a4394df9))
+
 ## [0.6.0](https://github.com/keysafe-dev/keysafe/compare/v0.5.0...v0.6.0) (2026-10-26)
 
 
