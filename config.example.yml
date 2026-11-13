@@ -10,6 +10,8 @@ version: 1
 #   native   (default) through the Security framework; the prompt returns after keysafe is rebuilt
 #   security through /usr/bin/security; "Always Allow" lasts, but any process of yours can read the
 #            items without a prompt
+# `security` is macOS only: on Linux it falls back to `native` with a warning, so the same
+# config file works on both.
 # keychain:
 #   backend: security
 
